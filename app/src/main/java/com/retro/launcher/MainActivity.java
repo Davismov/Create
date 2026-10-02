@@ -27,6 +27,7 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
+import android.net.Uri;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
@@ -40,7 +41,10 @@ import android.telephony.PhoneStateListener;
 import android.telephony.SignalStrength;
 import android.telephony.TelephonyCallback;
 import android.telephony.TelephonyManager;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
 import android.text.TextUtils;
+import android.text.style.ForegroundColorSpan;
 import android.util.Xml;
 import android.view.GestureDetector;
 import android.view.Gravity;
@@ -84,16 +88,56 @@ public class MainActivity extends Activity {
     // Weather location (Melbourne). Change these two numbers for another city.
     static final double LAT = -37.81, LON = 144.96;
 
-    static final int BAR = 0xE00B3C6E, PANEL = 0xCCFFFFFF, TXT = 0xFF0B3C6E;
+    int BAR, PANEL, TXT, SELB, BART, SELT; // theme colours, loaded from settings
+
+    static final String[] PAL_N = {"Navy", "Sky", "Black", "Grey", "White", "Red", "Orange", "Yellow", "Green", "Teal", "Purple", "Pink"};
+    static final int[] PAL_V = {0xFF0B3C6E, 0xFF35AEEA, 0xFF101820, 0xFF5A6470, 0xFFFFFFFF, 0xFFC62828,
+            0xFFEF6C00, 0xFFF9A825, 0xFF2E7D32, 0xFF00838F, 0xFF6A1B9A, 0xFFD81B60};
+    static final String[] FONT_N = {"Pixel", "Condensed", "Sans", "Serif", "Mono"};
+    static final int[] HG = {Gravity.LEFT, Gravity.CENTER_HORIZONTAL, Gravity.RIGHT};
+    static final int[] VG = {Gravity.TOP, Gravity.CENTER_VERTICAL, Gravity.BOTTOM};
+
+    static class Opt {
+        final String key, label, unit;
+        final int type, min, max, step, def; // type 0 number, 1 choice, 2 colour
+        final String[] ch;
+        Opt(String key, String label, int type, int min, int max, int step, int def, String unit, String[] ch) {
+            this.key = key; this.label = label; this.type = type; this.min = min; this.max = max;
+            this.step = step; this.def = def; this.unit = unit; this.ch = ch;
+        }
+        static Opt num(String k, String l, int min, int max, int step, int def, String unit) { return new Opt(k, l, 0, min, max, step, def, unit, null); }
+        static Opt choice(String k, String l, int def, String[] ch) { return new Opt(k, l, 1, 0, ch.length - 1, 1, def, "", ch); }
+        static Opt col(String k, String l, int def) { return new Opt(k, l, 2, 0, 11, 1, def, "", null); }
+    }
+
+    static final Opt O_CSIZE = Opt.num("c_size", "Clock size", 40, 100, 4, 68, "");
+    static final Opt O_CV = Opt.choice("c_v", "Clock height", 1, new String[]{"Top", "Centre", "Bottom"});
+    static final Opt O_CH = Opt.choice("c_h", "Clock side", 1, new String[]{"Left", "Centre", "Right"});
+    static final Opt O_CF = Opt.choice("c_f", "Clock font", 0, FONT_N);
+    static final Opt O_CC = Opt.col("c_c", "Clock colour", 4);
+    static final Opt O_BAR = Opt.col("t_bar", "Bar colour", 0);
+    static final Opt O_BARO = Opt.num("t_baro", "Bar opacity", 20, 100, 5, 88, "%");
+    static final Opt O_SEL = Opt.col("t_sel", "Highlight", 1);
+    static final Opt O_TXT = Opt.col("t_txt", "Text colour", 0);
+    static final Opt O_PAN = Opt.col("t_pan", "Panel colour", 4);
+    static final Opt O_PANO = Opt.num("t_pano", "Panel opacity", 20, 100, 5, 80, "%");
+    static final Opt O_UIF = Opt.choice("t_f", "Menu font", 0, FONT_N);
+    static final Opt O_KS = Opt.num("k_s", "Calendar scale", 60, 130, 10, 100, "%");
+    static final Opt O_KO = Opt.num("k_o", "Calendar opacity", 10, 100, 10, 60, "%");
+    static final Opt[] CLOCK = {O_CSIZE, O_CV, O_CH, O_CF, O_CC};
+    static final Opt[] COLOURS = {O_BAR, O_BARO, O_SEL, O_TXT, O_PAN, O_PANO, O_UIF};
+    static final Opt[] CALENDAR = {O_KS, O_KO};
     // Pages: swipe or D-pad left/right between 0..3
-    static final int M_MENU = 0, M_HOME = 1, M_LETTERS = 2, M_CAL = 3, M_OPT = 4, M_PACK = 5;
+    static final int M_MENU = 0, M_HOME = 1, M_LETTERS = 2, M_CAL = 3, M_OPT = 4, M_PACK = 5, M_SET = 6;
 
     // 9x9 pixel icons
     static final String[] MAIL = {"         ", "#########", "##     ##", "# #   # #", "#  # #  #", "#   #   #", "#       #", "#########", "         "};
     static final String[] BELL = {"    #    ", "   ###   ", "  #####  ", "  #####  ", " ####### ", " ####### ", "#########", "         ", "    #    "};
     static final String[] BOLT = {"      ## ", "     ##  ", "    ##   ", "   ##### ", "     ##  ", "    ##   ", "   ##    ", "  ##     ", "         "};
 
-    Typeface F, FB;
+    Typeface F, FB, pixel;
+    Opt[] curOpts;
+    String curTitle = "";
     SharedPreferences sp;
     int mode = M_HOME, sig = 0, selPos = 0, calY, calM;
     long lastWx = 0;
@@ -120,7 +164,30 @@ public class MainActivity extends Activity {
     };
 
     int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density + 0.5f); }
-    void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
+    void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_LONG).show(); }
+
+    int val(Opt o) { return sp.getInt(o.key, o.def); }
+
+    static float lum(int c) { return (0.299f * Color.red(c) + 0.587f * Color.green(c) + 0.114f * Color.blue(c)) / 255f; }
+
+    static int dark(int c) { return 0xFF000000 | ((int) (Color.red(c) * 0.62f) << 16) | ((int) (Color.green(c) * 0.62f) << 8) | (int) (Color.blue(c) * 0.62f); }
+
+    void loadTheme() {
+        int bar = PAL_V[val(O_BAR)], sel = PAL_V[val(O_SEL)], pan = PAL_V[val(O_PAN)];
+        BAR = ((val(O_BARO) * 255 / 100) << 24) | (bar & 0xFFFFFF);
+        PANEL = ((val(O_PANO) * 255 / 100) << 24) | (pan & 0xFFFFFF);
+        TXT = PAL_V[val(O_TXT)];
+        SELB = sel;
+        BART = lum(bar) > 0.7f ? 0xFF0B3C6E : Color.WHITE;
+        SELT = lum(sel) > 0.7f ? 0xFF0B3C6E : Color.WHITE;
+    }
+
+    Typeface font(int i, boolean bold) {
+        Typeface b = i == 0 ? pixel : Typeface.create(i == 1 ? "sans-serif-condensed" : i == 2 ? "sans-serif" : i == 3 ? "serif" : "monospace", Typeface.NORMAL);
+        return bold ? Typeface.create(b, Typeface.BOLD) : b;
+    }
+
+    void applyFonts() { F = font(val(O_UIF), false); FB = font(val(O_UIF), true); }
 
     TextView tv(String s, int sp, boolean bold, int color) {
         TextView t = new TextView(this);
@@ -210,7 +277,7 @@ public class MainActivity extends Activity {
             RectF all = new RectF(b);
             RectF top = new RectF(b.left, b.top, b.right, b.top + b.height() / 2f);
             p.setStyle(Paint.Style.FILL);
-            p.setShader(new LinearGradient(0, b.top, 0, b.bottom, 0xE03AB0EA, 0xE00A5CAF, Shader.TileMode.CLAMP));
+            p.setShader(new LinearGradient(0, b.top, 0, b.bottom, (0xE0000000 | (SELB & 0xFFFFFF)), (0xE0000000 | (dark(SELB) & 0xFFFFFF)), Shader.TileMode.CLAMP));
             c.drawRoundRect(all, r, r, p);
             p.setShader(new LinearGradient(0, top.top, 0, top.bottom, 0xB0FFFFFF, 0x38FFFFFF, Shader.TileMode.CLAMP));
             Path path = new Path();
@@ -237,12 +304,12 @@ public class MainActivity extends Activity {
         super.onCreate(b);
         sp = getSharedPreferences("retro", 0);
         try {
-            F = Typeface.createFromAsset(getAssets(), "font.ttf");
-            FB = Typeface.create(F, Typeface.BOLD);
+            pixel = Typeface.createFromAsset(getAssets(), "font.ttf");
         } catch (Exception e) {
-            F = Typeface.create("sans-serif-condensed", Typeface.NORMAL);
-            FB = Typeface.create("sans-serif-condensed", Typeface.BOLD);
+            pixel = Typeface.create("sans-serif-condensed", Typeface.NORMAL);
         }
+        loadTheme();
+        applyFonts();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
         getWindow().setNavigationBarColor(0xFF0B3C6E);
         if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED)
@@ -273,7 +340,10 @@ public class MainActivity extends Activity {
     @Override protected void onNewIntent(Intent i) { super.onNewIntent(i); showHome(); }
     @Override protected void onResume() { super.onResume(); h.removeCallbacks(tick); h.post(tick); }
     @Override protected void onPause() { super.onPause(); h.removeCallbacks(tick); }
-    @Override public void onBackPressed() { if (mode != M_HOME) showHome(); }
+    @Override public void onBackPressed() {
+        if (mode == M_SET || mode == M_PACK) showOptions();
+        else if (mode != M_HOME) showHome();
+    }
 
     @Override public boolean dispatchTouchEvent(MotionEvent ev) {
         gd.onTouchEvent(ev);
@@ -295,7 +365,7 @@ public class MainActivity extends Activity {
     }
 
     void navKey(int k) {
-        boolean isList = mode == M_MENU || mode == M_LETTERS || mode == M_OPT || mode == M_PACK;
+        boolean isList = mode == M_MENU || mode == M_LETTERS || mode == M_OPT || mode == M_PACK || mode == M_SET;
         switch (k) {
             case KeyEvent.KEYCODE_DPAD_UP:
                 if (isList) moveSel(-1); else if (mode == M_CAL) shiftMonth(calY, calM, -1);
@@ -304,10 +374,10 @@ public class MainActivity extends Activity {
                 if (isList) moveSel(1); else if (mode == M_CAL) shiftMonth(calY, calM, 1);
                 break;
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                if (mode <= M_CAL) go(mode - 1);
+                if (mode <= M_CAL) go(mode - 1); else if (mode == M_SET) adjust(-1);
                 break;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                if (mode <= M_CAL) go(mode + 1);
+                if (mode <= M_CAL) go(mode + 1); else if (mode == M_SET) adjust(1);
                 break;
             default:
                 if (isList) openSel(); else if (mode == M_HOME) go(M_MENU);
@@ -409,7 +479,7 @@ public class MainActivity extends Activity {
     LinearLayout bar(String left, View.OnClickListener lc, String right, View.OnClickListener rc) {
         LinearLayout b = new LinearLayout(this);
         b.setBackgroundColor(BAR);
-        TextView a = tv(left, 20, true, Color.WHITE), c = tv(right, 20, true, Color.WHITE);
+        TextView a = tv(left, 20, true, BART), c = tv(right, 20, true, BART);
         a.setPadding(dp(12), dp(12), dp(12), dp(12));
         c.setPadding(dp(12), dp(12), dp(12), dp(12));
         c.setGravity(Gravity.RIGHT);
@@ -426,7 +496,7 @@ public class MainActivity extends Activity {
         String[] lab = {l, m, r};
         View.OnClickListener[] act = {lc, mc, rc};
         for (int i = 0; i < 3; i++) {
-            TextView t = tv(lab[i], 20, i == 1, Color.WHITE);
+            TextView t = tv(lab[i], 20, i == 1, BART);
             t.setPadding(dp(8), dp(12), dp(8), dp(12));
             t.setGravity(i == 0 ? Gravity.LEFT : i == 1 ? Gravity.CENTER : Gravity.RIGHT);
             t.setOnClickListener(act[i]);
@@ -445,13 +515,16 @@ public class MainActivity extends Activity {
         return l;
     }
 
-    void listPage(String title, ListView l, View bottom) {
+    void listPage(String title, ListView l, View bottom) { listPage(title, null, l, bottom); }
+
+    void listPage(String title, View extra, ListView l, View bottom) {
         LinearLayout p = page();
-        TextView t = tv(title, 20, true, Color.WHITE);
+        TextView t = tv(title, 20, true, BART);
         t.setGravity(Gravity.CENTER);
         t.setBackgroundColor(BAR);
         t.setPadding(dp(8), dp(8), dp(8), dp(8));
         p.addView(t, new LinearLayout.LayoutParams(-1, -2));
+        if (extra != null) p.addView(extra, new LinearLayout.LayoutParams(-1, -2));
         p.addView(l, new LinearLayout.LayoutParams(-1, 0, 1));
         p.addView(bottom);
         setContentView(p);
@@ -475,12 +548,12 @@ public class MainActivity extends Activity {
     void styleRow(TextView t, int pos) {
         boolean sel = pos == selPos;
         t.setBackground(sel ? new Gloss() : null);
-        t.setTextColor(sel ? Color.WHITE : TXT);
+        t.setTextColor(sel ? SELT : TXT);
         t.setShadowLayer(sel ? 2 : 0, 1, 1, 0x99062447);
     }
 
-    ArrayAdapter<String> textAdapter(List<String> rows) {
-        return new ArrayAdapter<String>(this, 0, rows) {
+    <T extends CharSequence> ArrayAdapter<T> textAdapter(List<T> rows) {
+        return new ArrayAdapter<T>(this, 0, rows) {
             @Override public View getView(int pos, View v, ViewGroup parent) {
                 TextView t = (v instanceof TextView) ? (TextView) v : new TextView(MainActivity.this);
                 t.setText(getItem(pos));
@@ -499,13 +572,14 @@ public class MainActivity extends Activity {
 
     void showHome() {
         mode = M_HOME;
+        int cc = PAL_V[val(O_CC)], hg = HG[val(O_CH)];
         LinearLayout p = page();
 
         LinearLayout top = new LinearLayout(this);
         top.setBackgroundColor(BAR);
         top.setPadding(dp(10), dp(6), dp(10), dp(6));
         top.setGravity(Gravity.CENTER_VERTICAL);
-        wx = tv(sp.getString("wx", "Weather"), 15, true, Color.WHITE);
+        wx = tv(sp.getString("wx", "Weather"), 15, true, BART);
         wx.setSingleLine(true);
         wx.setEllipsize(TextUtils.TruncateAt.END);
         top.addView(wx, new LinearLayout.LayoutParams(0, -2, 1));
@@ -518,36 +592,37 @@ public class MainActivity extends Activity {
             ip.setMargins(0, 0, dp(6), 0);
             top.addView(ic, ip);
         }
-        batt = tv("", 15, true, Color.WHITE);
+        batt = tv("", 15, true, BART);
         top.addView(batt);
         p.addView(top);
 
         LinearLayout mid = new LinearLayout(this);
         mid.setOrientation(LinearLayout.VERTICAL);
-        mid.setGravity(Gravity.CENTER);
+        mid.setGravity(VG[val(O_CV)]);
+        mid.setPadding(dp(14), dp(10), dp(14), dp(10));
         TextClock clock = new TextClock(this);
         clock.setFormat12Hour("h:mm");
         clock.setFormat24Hour("HH:mm");
-        clock.setTextSize(68);
-        clock.setTextColor(Color.WHITE);
-        clock.setTypeface(FB);
+        clock.setTextSize(val(O_CSIZE));
+        clock.setTextColor(cc);
+        clock.setTypeface(font(val(O_CF), true));
         clock.setShadowLayer(6, 2, 2, 0xAA000000);
-        clock.setGravity(Gravity.CENTER);
+        clock.setGravity(hg);
         TextClock date = new TextClock(this);
         date.setFormat12Hour("EEEE d MMMM");
         date.setFormat24Hour("EEEE d MMMM");
         date.setTextSize(20);
-        date.setTextColor(Color.WHITE);
-        date.setTypeface(F);
+        date.setTextColor(cc);
+        date.setTypeface(font(val(O_CF), false));
         date.setShadowLayer(4, 1, 1, 0xAA000000);
-        date.setGravity(Gravity.CENTER);
-        noteCount = tv("", 17, true, Color.WHITE);
+        date.setGravity(hg);
+        noteCount = tv("", 17, true, cc);
         noteCount.setShadowLayer(4, 1, 1, 0xAA000000);
-        noteCount.setGravity(Gravity.CENTER);
+        noteCount.setGravity(hg);
         noteCount.setPadding(0, dp(12), 0, 0);
 
         LinearLayout bars = new LinearLayout(this);
-        bars.setGravity(Gravity.CENTER);
+        bars.setGravity(hg);
         bars.setPadding(0, dp(16), 0, 0);
         sigG = new HGauge(this, 5, true, false);
         batG = new HGauge(this, 8, false, true);
@@ -626,10 +701,20 @@ public class MainActivity extends Activity {
             CharSequence t = e.getCharSequence("android.title"), x = e.getCharSequence("android.text");
             rows.add((t == null ? "" : t) + (x == null ? "" : "\n" + x));
         }
-        if (rows.isEmpty()) rows.add(NotifService.inst == null ? "Tap here to allow letter access" : "No letters");
+        if (NotifService.inst == null) {
+            rows.add("Tap here to allow letter access");
+            rows.add("Greyed out? Tap here");
+        } else if (rows.isEmpty()) {
+            rows.add("No letters");
+        }
         setupList(textAdapter(rows), pos -> {
             if (NotifService.inst == null) {
-                startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
+                if (pos == 1) {
+                    toast("Tap the 3 dots (top right), then Allow restricted settings");
+                    startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName())));
+                } else {
+                    startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
+                }
                 return;
             }
             if (pos < items.size()) {
@@ -764,20 +849,88 @@ public class MainActivity extends Activity {
     void showOptions() {
         mode = M_OPT;
         List<String> rows = new ArrayList<>();
+        rows.add("Clock settings");
+        rows.add("Colour settings");
+        rows.add("Calendar settings");
         rows.add("Icon pack");
         rows.add("Wallpaper");
         rows.add("Calendar photo");
         rows.add("Reset calendar photo");
         setupList(textAdapter(rows), pos -> {
-            if (pos == 0) showPacks();
-            else if (pos == 1) pickWallpaper();
-            else if (pos == 2) pickPhoto();
+            if (pos == 0) showSettings("Clock", CLOCK, 0);
+            else if (pos == 1) showSettings("Colours", COLOURS, 0);
+            else if (pos == 2) showSettings("Calendar", CALENDAR, 0);
+            else if (pos == 3) showPacks();
+            else if (pos == 4) pickWallpaper();
+            else if (pos == 5) pickPhoto();
             else {
                 new File(getFilesDir(), "calbg.jpg").delete();
                 toast("Calendar photo reset");
             }
         });
         listPage("Options", list, bar("Select", v -> openSel(), "Back", v -> showMenu()));
+    }
+
+    CharSequence rowText(Opt o) {
+        int v = val(o);
+        if (o.type == 0) return o.label + ": " + v + o.unit;
+        if (o.type == 1) return o.label + ": " + o.ch[v];
+        SpannableStringBuilder sb = new SpannableStringBuilder(o.label + ": \u25A0 " + PAL_N[v]);
+        int i = o.label.length() + 2;
+        sb.setSpan(new ForegroundColorSpan(PAL_V[v]), i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return sb;
+    }
+
+    View clockPreview() {
+        LinearLayout b = new LinearLayout(this);
+        b.setBackgroundColor(BAR);
+        b.setGravity(Gravity.CENTER);
+        TextView t = new TextView(this);
+        t.setText("12:34");
+        t.setTextSize(val(O_CSIZE));
+        t.setTextColor(PAL_V[val(O_CC)]);
+        t.setTypeface(font(val(O_CF), true));
+        b.addView(t);
+        return b;
+    }
+
+    // Left/right (or - and +) change the highlighted setting; centre/second tap = +
+    void showSettings(String title, Opt[] opts, int sel) {
+        mode = M_SET;
+        curTitle = title;
+        curOpts = opts;
+        List<CharSequence> rows = new ArrayList<>();
+        for (Opt o : opts) rows.add(rowText(o));
+        rows.add("Reset to defaults");
+        setupList(textAdapter(rows), pos -> {
+            if (pos >= curOpts.length) resetOpts(); else adjust(1);
+        });
+        selPos = Math.min(sel, rows.size() - 1);
+        list.setSelection(selPos);
+        listPage(title, opts == CLOCK ? clockPreview() : null, list,
+                bar3("-", v -> adjust(-1), "Back", v -> showOptions(), "+", v -> adjust(1)));
+    }
+
+    void adjust(int dir) {
+        if (curOpts == null || selPos >= curOpts.length) return;
+        Opt o = curOpts[selPos];
+        int v = val(o);
+        if (o.type == 0) v = Math.max(o.min, Math.min(o.max, v + dir * o.step));
+        else { int n = o.type == 1 ? o.ch.length : PAL_V.length; v = (v + dir + n) % n; }
+        sp.edit().putInt(o.key, v).apply();
+        loadTheme();
+        applyFonts();
+        showSettings(curTitle, curOpts, selPos);
+    }
+
+    void resetOpts() {
+        SharedPreferences.Editor ed = sp.edit();
+        for (Opt o : curOpts) ed.remove(o.key);
+        ed.apply();
+        loadTheme();
+        applyFonts();
+        toast("Defaults restored");
+        showSettings(curTitle, curOpts, selPos);
     }
 
     void showPacks() {
@@ -868,9 +1021,10 @@ public class MainActivity extends Activity {
         Calendar now = Calendar.getInstance();
         boolean thisMonth = now.get(Calendar.YEAR) == y && now.get(Calendar.MONTH) == m;
         int today = now.get(Calendar.DAY_OF_MONTH);
+        float sc = val(O_KS) / 100f;
 
         LinearLayout p = page();
-        TextView title = tv(new SimpleDateFormat("MMM yyyy", Locale.getDefault()).format(first.getTime()), 18, true, Color.WHITE);
+        TextView title = tv(new SimpleDateFormat("MMM yyyy", Locale.getDefault()).format(first.getTime()), 18, true, BART);
         title.setBackgroundColor(BAR);
         title.setPadding(dp(10), dp(8), dp(10), dp(8));
         title.setOnClickListener(v -> {
@@ -881,14 +1035,14 @@ public class MainActivity extends Activity {
 
         LinearLayout grid = new LinearLayout(this);
         grid.setOrientation(LinearLayout.VERTICAL);
-        grid.setBackgroundColor(0x99FFFFFF);
+        grid.setBackgroundColor(((val(O_KO) * 255 / 100) << 24) | 0xFFFFFF);
         grid.setPadding(dp(4), dp(4), dp(4), dp(4));
         String[] names = {"Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"};
         LinearLayout head = new LinearLayout(this);
         head.setBackgroundColor(0xAA9FD3F0);
         head.addView(new View(this), new LinearLayout.LayoutParams(dp(26), 1));
         for (int i = 0; i < 7; i++) {
-            TextView t = tv(names[i], 15, true, i == 6 ? 0xFFD32F2F : TXT);
+            TextView t = tv(names[i], Math.round(15 * sc), true, i == 6 ? 0xFFD32F2F : TXT);
             t.setGravity(Gravity.CENTER);
             t.setPadding(0, dp(4), 0, dp(4));
             head.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
@@ -898,15 +1052,15 @@ public class MainActivity extends Activity {
             LinearLayout row = new LinearLayout(this);
             Calendar rs = (Calendar) first.clone();
             rs.add(Calendar.DAY_OF_MONTH, r * 7 - offset);
-            TextView wk = tv(String.valueOf(rs.get(Calendar.WEEK_OF_YEAR)), 12, false, 0x990B3C6E);
+            TextView wk = tv(String.valueOf(rs.get(Calendar.WEEK_OF_YEAR)), Math.round(12 * sc), false, 0x990B3C6E);
             wk.setGravity(Gravity.CENTER);
             row.addView(wk, new LinearLayout.LayoutParams(dp(26), -1));
             for (int col = 0; col < 7; col++) {
                 int d = r * 7 + col - offset + 1;
                 boolean inMonth = d >= 1 && d <= days;
                 int shown = d < 1 ? prevDays + d : d > days ? d - days : d;
-                int color = !inMonth ? 0x880B3C6E : col == 6 ? 0xFFD32F2F : TXT;
-                TextView t = tv(String.valueOf(shown), 18, false, color);
+                int color = !inMonth ? ((TXT & 0xFFFFFF) | 0x88000000) : col == 6 ? 0xFFD32F2F : TXT;
+                TextView t = tv(String.valueOf(shown), Math.round(18 * sc), false, color);
                 t.setGravity(Gravity.CENTER);
                 GradientDrawable g = new GradientDrawable();
                 g.setStroke(1, 0x44506070);
@@ -922,7 +1076,12 @@ public class MainActivity extends Activity {
             }
             grid.addView(row, new LinearLayout.LayoutParams(-1, 0, 1));
         }
-        p.addView(grid, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(-1, 0, 1);
+        float shrink = 1f - Math.min(1f, sc);
+        int mx = (int) (shrink * getResources().getDisplayMetrics().widthPixels * 0.5f);
+        int my = (int) (shrink * getResources().getDisplayMetrics().heightPixels * 0.25f);
+        glp.setMargins(mx, my, mx, my);
+        p.addView(grid, glp);
         p.addView(bar3("Prev", v -> shiftMonth(y, m, -1), "Photo", v -> pickPhoto(), "Next", v -> shiftMonth(y, m, 1)));
 
         FrameLayout fl = new FrameLayout(this);
