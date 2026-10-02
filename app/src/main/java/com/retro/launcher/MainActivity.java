@@ -3,6 +3,8 @@ package com.retro.launcher;
 import android.Manifest;
 import android.app.Activity;
 import android.app.ActivityOptions;
+import android.app.DatePickerDialog;
+import android.app.TimePickerDialog;
 import android.app.AlertDialog;
 import android.app.AlarmManager;
 import android.app.Notification;
@@ -28,7 +30,13 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
+import android.media.MediaPlayer;
+import android.media.MediaRecorder;
 import android.net.Uri;
+import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
@@ -36,6 +44,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.service.notification.StatusBarNotification;
 import android.telephony.PhoneStateListener;
@@ -46,6 +55,7 @@ import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextUtils;
 import android.text.style.ForegroundColorSpan;
+import android.util.LruCache;
 import android.util.Xml;
 import android.view.GestureDetector;
 import android.view.Gravity;
@@ -70,22 +80,27 @@ import org.xmlpull.v1.XmlPullParser;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.IntConsumer;
 
 public class MainActivity extends Activity {
@@ -149,8 +164,17 @@ public class MainActivity extends Activity {
     static final Opt O_WXSRC = Opt.choice("w_src", "Weather source", 1, new String[]{"Open-Meteo", "BOM (Australia)"});
     static final Opt[] SHOW = {O_STOP, O_SWX, O_SSIG, O_SBAT, O_SPCT, O_SMAIL, O_SALM, O_SCHG, O_SCLK, O_SDATE, O_SCNT, O_SLAB};
     static final Opt[] CALENDAR = {O_KS, O_KO};
+    static final Opt O_ESIZE = Opt.num("e_size", "Icon size", 32, 80, 4, 52, "");
+    static final Opt O_ELOOK = Opt.choice("e_look", "Icon look", 0, new String[]{"Smooth", "Pixel 2x", "Pixel 3x", "Pixel 4x", "Pixel 6x"});
+    static final int[] BLOCK = {1, 2, 3, 4, 6};
+    static final Opt[] ICONS = {O_ESIZE, O_ELOOK, O_SLAB};
+    static final Opt O_LR = Opt.choice("lr", "Low-res look", 0, new String[]{"Off", "2x (240x320)", "3x (160x213)", "4x (120x160)"});
+    static final Opt O_LRC = Opt.choice("lr_col", "Reduced colours", 1, ONOFF);
+    static final Opt O_LRG = Opt.choice("lr_grid", "Pixel grid", 1, ONOFF);
+    static final Opt[] LOWRES = {O_LR, O_LRC, O_LRG};
     // Pages: swipe or D-pad left/right between 0..3
-    static final int M_MENU = 0, M_ESS = 1, M_HOME = 2, M_LETTERS = 3, M_CAL = 4, M_OPT = 5, M_PACK = 6, M_SET = 7, M_PICK = 8, M_PAGES = 9;
+    static final int M_MENU = 0, M_ESS = 1, M_HOME = 2, M_LETTERS = 3, M_CAL = 4, M_REM = 5, M_JOUR = 6, M_MAP = 7,
+            M_OPT = 8, M_PACK = 9, M_SET = 10, M_PICK = 11, M_PAGES = 12, M_LAST = 7, NPAGES = 8;
 
     // 9x9 pixel icons
     static final String[] MAIL = {"         ", "#########", "##     ##", "# #   # #", "#  # #  #", "#   #   #", "#       #", "#########", "         "};
@@ -165,7 +189,30 @@ public class MainActivity extends Activity {
     Opt[] curOpts;
     String curTitle = "";
     SharedPreferences sp;
-    int mode = M_HOME, sig = 0, selPos = 0, calY, calM;
+    int mode = M_HOME, sig = 0, selPos = 0, calY, calM, lowScale = 1;
+    final Map<String, Bitmap> iconCache = new HashMap<>();
+    // map
+    MapView mapView;
+    LocationManager locMgr;
+    LocationListener locLis;
+    final ExecutorService tilePool = Executors.newFixedThreadPool(3);
+    final Set<String> pending = new HashSet<>();
+    final LruCache<String, Bitmap> tileCache = new LruCache<String, Bitmap>(16 * 1024) {
+        @Override protected int sizeOf(String k, Bitmap b) { return b.getByteCount() / 1024; }
+    };
+    // journal
+    MediaPlayer mp;
+    String playingPath = "";
+    MediaRecorder rec;
+    AlertDialog recDlg;
+    long recStart;
+    final Runnable recTick = new Runnable() {
+        @Override public void run() {
+            if (rec == null || recDlg == null) return;
+            recDlg.setMessage(fmtSecs((int) ((SystemClock.elapsedRealtime() - recStart) / 1000)));
+            h.postDelayed(this, 500);
+        }
+    };
     long lastWx = 0;
     TextView batt, noteCount, wx;
     HGauge sigG, batG;
@@ -206,6 +253,7 @@ public class MainActivity extends Activity {
         SELB = sel;
         BART = lum(bar) > 0.7f ? 0xFF0B3C6E : Color.WHITE;
         SELT = lum(sel) > 0.7f ? 0xFF0B3C6E : Color.WHITE;
+        lowScale = val(O_LR) + 1; // choice 0 = off (1x), 1 = 2x, 2 = 3x, 3 = 4x
     }
 
     Typeface font(int i, boolean bold) {
@@ -227,25 +275,24 @@ public class MainActivity extends Activity {
     Drawable barBg() { return new BarBg(val(O_BARS)); }
 
     // ---- page order (saved in settings; Clock/home can't be switched off)
-    static final String[] PAGE_N = {"Menu", "Essentials", "Clock (home)", "Letters", "Calendar"};
+    static final String[] PAGE_N = {"Menu", "Essentials", "Clock (home)", "Letters", "Calendar", "Reminders", "Journal", "Map"};
 
     int[] pageOrder() {
-        int[] d = {M_MENU, M_ESS, M_HOME, M_LETTERS, M_CAL};
+        int[] d = new int[NPAGES];
+        for (int i = 0; i < NPAGES; i++) d[i] = i;
         String s = sp.getString("pg_order", "");
         if (s.isEmpty()) return d;
+        int[] o = new int[NPAGES];
+        boolean[] seen = new boolean[NPAGES];
+        int n = 0;
         try {
-            String[] a = s.split(",");
-            if (a.length != d.length) return d;
-            int[] o = new int[d.length];
-            boolean[] seen = new boolean[d.length];
-            for (int i = 0; i < a.length; i++) {
-                int v = Integer.parseInt(a[i].trim());
-                if (v < 0 || v >= d.length || seen[v]) return d;
-                seen[v] = true;
-                o[i] = v;
+            for (String a : s.split(",")) {
+                int v = Integer.parseInt(a.trim());
+                if (v >= 0 && v < NPAGES && !seen[v]) { seen[v] = true; o[n++] = v; }
             }
-            return o;
         } catch (Exception e) { return d; }
+        for (int i = 0; i < NPAGES; i++) if (!seen[i]) o[n++] = i;
+        return o;
     }
 
     void savePageOrder(int[] o) {
@@ -313,10 +360,104 @@ public class MainActivity extends Activity {
     void resetPages() {
         SharedPreferences.Editor ed = sp.edit();
         ed.remove("pg_order");
-        for (int p = 0; p < 5; p++) ed.remove("pg_off" + p);
+        for (int p = 0; p < NPAGES; p++) ed.remove("pg_off" + p);
         ed.apply();
         toast("Pages reset");
         showPages(0);
+    }
+
+    // Turns an icon into a chunky low-resolution version (draw small, scale up with no smoothing)
+    Bitmap pixIcon(Drawable d, int size, String key) {
+        int block = BLOCK[Math.min(BLOCK.length - 1, val(O_ELOOK))];
+        if (block <= 1 || d == null || size < 8) return null;
+        String ck = key + "|" + size + "|" + block + "|" + packPkg;
+        Bitmap big = iconCache.get(ck);
+        if (big != null) return big;
+        try {
+            int n = Math.max(4, size / block);
+            Bitmap small = Bitmap.createBitmap(n, n, Bitmap.Config.ARGB_8888);
+            Rect old = d.copyBounds();
+            d.setBounds(0, 0, n, n);
+            d.draw(new Canvas(small));
+            d.setBounds(old);
+            big = Bitmap.createScaledBitmap(small, size, size, false);
+            small.recycle();
+            if (iconCache.size() > 150) iconCache.clear();
+            iconCache.put(ck, big);
+            return big;
+        } catch (Throwable t) { return null; }
+    }
+
+    // Wraps every screen. When Low-res look is on, the screen is drawn into a small bitmap
+    // and scaled up with no smoothing, so everything looks blocky. Touch still works normally.
+    @Override public void setContentView(View v) {
+        if (mode != M_MAP) { stopLocation(); mapView = null; }
+        if (mode != M_JOUR) stopPlay();
+        PixelFrame pf = new PixelFrame(this);
+        pf.setLayerType(lowScale > 1 ? View.LAYER_TYPE_SOFTWARE : View.LAYER_TYPE_NONE, null);
+        pf.addView(v, new FrameLayout.LayoutParams(-1, -1));
+        super.setContentView(pf);
+    }
+
+    class PixelFrame extends FrameLayout {
+        Bitmap bmp;
+        Canvas bc;
+        int[] px;
+        float[] lines;
+        int lw, lh, ls;
+        final Paint blitP = new Paint(), gridP = new Paint();
+        final Rect dst = new Rect();
+        final int[] lut = new int[256];
+
+        PixelFrame(Context c) {
+            super(c);
+            blitP.setFilterBitmap(false);
+            blitP.setAntiAlias(false);
+            blitP.setDither(false);
+            gridP.setColor(0x1A000000);
+            gridP.setStrokeWidth(1);
+            for (int i = 0; i < 256; i++) lut[i] = (i >> 5) * 255 / 7; // 8 levels per colour
+        }
+
+        @Override protected void dispatchDraw(Canvas canvas) {
+            int s = lowScale, w = getWidth(), hgt = getHeight();
+            if (s <= 1 || w <= 0 || hgt <= 0) { super.dispatchDraw(canvas); return; }
+            int bw = Math.max(1, (w + s - 1) / s), bh = Math.max(1, (hgt + s - 1) / s);
+            if (bmp == null || bmp.getWidth() != bw || bmp.getHeight() != bh) {
+                if (bmp != null) bmp.recycle();
+                bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
+                bc = new Canvas(bmp);
+                px = null;
+            }
+            bmp.eraseColor(0);
+            bc.save();
+            bc.scale(bw / (float) w, bh / (float) hgt);
+            super.dispatchDraw(bc);
+            bc.restore();
+            if (on(O_LRC)) {
+                if (px == null) px = new int[bw * bh];
+                bmp.getPixels(px, 0, bw, 0, 0, bw, bh);
+                for (int i = 0; i < px.length; i++) {
+                    int c = px[i];
+                    px[i] = (c & 0xFF000000) | (lut[(c >> 16) & 0xFF] << 16) | (lut[(c >> 8) & 0xFF] << 8) | lut[c & 0xFF];
+                }
+                bmp.setPixels(px, 0, bw, 0, 0, bw, bh);
+            }
+            dst.set(0, 0, w, hgt);
+            canvas.drawBitmap(bmp, null, dst, blitP);
+            if (on(O_LRG)) {
+                if (lines == null || lw != w || lh != hgt || ls != s) {
+                    lw = w; lh = hgt; ls = s;
+                    int nv = (w + s - 1) / s, nh = (hgt + s - 1) / s;
+                    lines = new float[(nv + nh) * 4];
+                    int k = 0;
+                    for (int i = 1; i < nv; i++) { lines[k++] = i * s; lines[k++] = 0; lines[k++] = i * s; lines[k++] = hgt; }
+                    for (int i = 1; i < nh; i++) { lines[k++] = 0; lines[k++] = i * s; lines[k++] = w; lines[k++] = i * s; }
+                    for (; k < lines.length; k++) lines[k] = 0;
+                }
+                canvas.drawLines(lines, gridP);
+            }
+        }
     }
 
     TextView tv(String s, int sp, boolean bold, int color) {
@@ -491,7 +632,7 @@ public class MainActivity extends Activity {
             requestPermissions(new String[]{Manifest.permission.READ_PHONE_STATE}, 1);
         gd = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
             @Override public boolean onFling(MotionEvent a, MotionEvent e, float vx, float vy) {
-                if (a == null || e == null || mode > M_CAL) return false;
+                if (a == null || e == null || mode > M_LAST || mode == M_MAP) return false;
                 float dx = e.getX() - a.getX(), dy = e.getY() - a.getY();
                 if (Math.abs(dx) > dp(70) && Math.abs(dx) > Math.abs(dy) * 1.5f) {
                     final int dir = dx < 0 ? 1 : -1;
@@ -501,6 +642,7 @@ public class MainActivity extends Activity {
                 return false;
             }
         });
+        try { Reminders.rescheduleAll(this); } catch (Throwable t) { }
         listenSignal();
         loadPack();
         showHome();
@@ -508,13 +650,22 @@ public class MainActivity extends Activity {
 
     @Override public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
         super.onRequestPermissionsResult(code, perms, res);
-        listenSignal();
+        boolean ok = res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED;
+        if (code == 2) {
+            if (ok) doRecord(); else toast("Microphone permission is needed to record");
+        } else if (code == 3) {
+            if (ok && mode == M_MAP && mapView != null) {
+                startLocation();
+                mapView.centreNext = true;
+                toast("Waiting for a GPS fix. This can take a few minutes, outdoors.");
+            }
+        } else if (code == 1) listenSignal();
     }
 
-    @Override protected void onDestroy() { super.onDestroy(); stopSignal(); }
+    @Override protected void onDestroy() { super.onDestroy(); stopSignal(); stopPlay(); stopLocation(); tilePool.shutdownNow(); }
     @Override protected void onNewIntent(Intent i) { super.onNewIntent(i); showHome(); }
-    @Override protected void onResume() { super.onResume(); h.removeCallbacks(tick); h.post(tick); }
-    @Override protected void onPause() { super.onPause(); h.removeCallbacks(tick); }
+    @Override protected void onResume() { super.onResume(); h.removeCallbacks(tick); h.post(tick); if (mode == M_MAP) startLocation(); }
+    @Override protected void onPause() { super.onPause(); h.removeCallbacks(tick); stopPlay(); stopLocation(); if (rec != null) finishRecord(true); }
     @Override public void onBackPressed() {
         if (mode == M_PICK) showEssentials();
         else if (mode == M_SET || mode == M_PACK || mode == M_PAGES) showOptions();
@@ -542,7 +693,8 @@ public class MainActivity extends Activity {
 
     void navKey(int k) {
         if (mode == M_ESS) { essKey(k); return; }
-        boolean isList = mode == M_MENU || mode == M_LETTERS || mode == M_OPT || mode == M_PACK || mode == M_SET || mode == M_PICK || mode == M_PAGES;
+        if (mode == M_MAP) { mapKey(k); return; }
+        boolean isList = mode == M_REM || mode == M_JOUR || mode == M_MENU || mode == M_LETTERS || mode == M_OPT || mode == M_PACK || mode == M_SET || mode == M_PICK || mode == M_PAGES;
         switch (k) {
             case KeyEvent.KEYCODE_DPAD_UP:
                 if (isList) moveSel(-1); else if (mode == M_CAL) shiftMonth(calY, calM, -1);
@@ -551,10 +703,10 @@ public class MainActivity extends Activity {
                 if (isList) moveSel(1); else if (mode == M_CAL) shiftMonth(calY, calM, 1);
                 break;
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                if (mode <= M_CAL) step(-1); else if (mode == M_SET) adjust(-1); else if (mode == M_PAGES) movePage(-1);
+                if (mode <= M_LAST) step(-1); else if (mode == M_SET) adjust(-1); else if (mode == M_PAGES) movePage(-1);
                 break;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                if (mode <= M_CAL) step(1); else if (mode == M_SET) adjust(1); else if (mode == M_PAGES) movePage(1);
+                if (mode <= M_LAST) step(1); else if (mode == M_SET) adjust(1); else if (mode == M_PAGES) movePage(1);
                 break;
             default:
                 if (isList) openSel(); else if (mode == M_HOME) go(M_MENU);
@@ -569,11 +721,14 @@ public class MainActivity extends Activity {
     }
 
     void go(int p) {
-        if (p < M_MENU || p > M_CAL || p == mode) return;
+        if (p < M_MENU || p > M_LAST || p == mode) return;
         if (p == M_MENU) showMenu();
         else if (p == M_ESS) showEssentials();
         else if (p == M_HOME) showHome();
         else if (p == M_LETTERS) showLetters();
+        else if (p == M_REM) showReminders(0);
+        else if (p == M_JOUR) showJournal(0);
+        else if (p == M_MAP) showMap();
         else { Calendar n = Calendar.getInstance(); showCalendar(n.get(Calendar.YEAR), n.get(Calendar.MONTH)); }
     }
 
@@ -1082,6 +1237,8 @@ public class MainActivity extends Activity {
                 t.setGravity(Gravity.CENTER_VERTICAL);
                 t.setPadding(dp(10), dp(8), dp(10), dp(8));
                 Drawable d = iconFor(ri, pm);
+                Bitmap pb = pixIcon(d, dp(36), ri.activityInfo.packageName + "/" + ri.activityInfo.name);
+                if (pb != null) d = new BitmapDrawable(getResources(), pb);
                 d.setBounds(0, 0, dp(36), dp(36));
                 t.setCompoundDrawables(d, null, null, null);
                 t.setCompoundDrawablePadding(dp(12));
@@ -1158,9 +1315,12 @@ public class MainActivity extends Activity {
                 inner.setOrientation(LinearLayout.VERTICAL);
                 inner.setGravity(Gravity.CENTER);
                 if (d != null) {
+                    int isz = dp(val(O_ESIZE));
                     ImageView iv = new ImageView(this);
-                    iv.setImageDrawable(d);
-                    inner.addView(iv, new LinearLayout.LayoutParams(dp(52), dp(52)));
+                    iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                    Bitmap pb = pixIcon(d, isz, s);
+                    if (pb != null) iv.setImageBitmap(pb); else iv.setImageDrawable(d);
+                    inner.addView(iv, new LinearLayout.LayoutParams(isz, isz));
                     if (on(O_SLAB)) {
                         TextView lb = tv(label, 12, false, Color.WHITE);
                         lb.setShadowLayer(3, 1, 1, 0xCC000000);
@@ -1240,6 +1400,8 @@ public class MainActivity extends Activity {
         rows.add("Clock settings");
         rows.add("Colour settings");
         rows.add("Calendar settings");
+        rows.add("Icons & essentials");
+        rows.add("Low-res look");
         rows.add("Weather settings");
         rows.add("Icon pack");
         rows.add("Wallpaper");
@@ -1253,14 +1415,16 @@ public class MainActivity extends Activity {
             else if (pos == 2) showSettings("Clock", CLOCK, 0);
             else if (pos == 3) showSettings("Colours", COLOURS, 0);
             else if (pos == 4) showSettings("Calendar", CALENDAR, 0);
-            else if (pos == 5) showWeather(0);
-            else if (pos == 6) showPacks();
-            else if (pos == 7) pickWallpaper();
-            else if (pos == 8) pickPhoto();
-            else if (pos == 9) {
+            else if (pos == 5) showSettings("Icons", ICONS, 0);
+            else if (pos == 6) showSettings("Low-res look", LOWRES, 0);
+            else if (pos == 7) showWeather(0);
+            else if (pos == 8) showPacks();
+            else if (pos == 9) pickWallpaper();
+            else if (pos == 10) pickPhoto();
+            else if (pos == 11) {
                 new File(getFilesDir(), "calbg.jpg").delete();
                 toast("Calendar photo reset");
-            } else if (pos == 10) pickFont();
+            } else if (pos == 12) pickFont();
             else removeFont();
         });
         listPage("Options", list, bar("Select", v -> openSel(), "Back", v -> showMenu()));
@@ -1608,5 +1772,645 @@ public class MainActivity extends Activity {
         }
         fl.addView(p, new FrameLayout.LayoutParams(-1, -1));
         setContentView(fl);
+    }
+
+    // ======================================================================
+    // shared helpers for the new pages
+    // ======================================================================
+
+    void showDlg(AlertDialog.Builder b) {
+        AlertDialog dlg = b.create();
+        if (dlg.getWindow() != null) dlg.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+        dlg.show();
+    }
+
+    void confirm(String msg, final Runnable yes) {
+        new AlertDialog.Builder(this).setMessage(msg)
+                .setPositiveButton("Yes", (d, w) -> yes.run())
+                .setNegativeButton("No", null).show();
+    }
+
+    SimpleDateFormat dtf() {
+        return new SimpleDateFormat(android.text.format.DateFormat.is24HourFormat(this) ? "EEE d MMM  HH:mm" : "EEE d MMM  h:mm a", Locale.getDefault());
+    }
+
+    String fmtSecs(int sec) { return (sec / 60) + ":" + (sec % 60 < 10 ? "0" : "") + (sec % 60); }
+
+    void deleteRec(File f) {
+        File[] kids = f.listFiles();
+        if (kids != null) for (File k : kids) deleteRec(k);
+        f.delete();
+    }
+
+    // ======================================================================
+    // reminders page
+    // ======================================================================
+
+    void showReminders(int sel) {
+        mode = M_REM;
+        final List<Reminders.Item> items = Reminders.load(this);
+        List<String> rows = new ArrayList<>();
+        SimpleDateFormat df = dtf();
+        boolean anyDone = false;
+        for (Reminders.Item it : items) {
+            rows.add((it.fired ? "(done) " : "") + df.format(new Date(it.time)) + "\n" + it.text);
+            if (it.fired) anyDone = true;
+        }
+        final int nItems = items.size();
+        final boolean clearRow = anyDone;
+        if (anyDone) rows.add("Clear finished reminders");
+        if (rows.isEmpty()) rows.add("No reminders. Press Add.");
+        setupList(textAdapter(rows), pos -> {
+            if (pos < nItems) remOpen(items.get(pos), pos);
+            else if (clearRow && pos == nItems) {
+                List<Reminders.Item> l = Reminders.load(this);
+                for (int i = l.size() - 1; i >= 0; i--) if (l.get(i).fired) l.remove(i);
+                Reminders.save(this, l);
+                showReminders(0);
+            }
+        });
+        selPos = Math.min(sel, rows.size() - 1);
+        list.setSelection(selPos);
+        listPage("Reminders", list, bar3("Add", v -> remAdd(null), "Open", v -> openSel(), "Back", v -> showHome()));
+    }
+
+    void remOpen(final Reminders.Item it, final int pos) {
+        new AlertDialog.Builder(this).setTitle(it.text).setItems(new String[]{"Edit", "Delete", "Cancel"}, (d, which) -> {
+            if (which == 0) remAdd(it);
+            else if (which == 1) confirm("Delete this reminder?", () -> {
+                Reminders.cancel(this, it.id);
+                List<Reminders.Item> l = Reminders.load(this);
+                for (int i = l.size() - 1; i >= 0; i--) if (l.get(i).id == it.id) l.remove(i);
+                Reminders.save(this, l);
+                if (mode == M_REM) showReminders(Math.max(0, pos - 1));
+            });
+        }).show();
+    }
+
+    // Step 1: pick the date. Step 2: pick the time. Step 3: type the text.
+    void remAdd(final Reminders.Item base) {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 4);
+        final Calendar c = Calendar.getInstance();
+        if (base != null) c.setTimeInMillis(base.time);
+        else { c.add(Calendar.HOUR_OF_DAY, 1); c.set(Calendar.MINUTE, 0); }
+        final boolean h24 = android.text.format.DateFormat.is24HourFormat(this);
+        new DatePickerDialog(this, (dpk, yy, mm, dd) -> {
+            new TimePickerDialog(this, (tpk, hh, mi) -> {
+                Calendar t = Calendar.getInstance();
+                t.clear();
+                t.set(yy, mm, dd, hh, mi, 0);
+                remText(base, t.getTimeInMillis());
+            }, c.get(Calendar.HOUR_OF_DAY), c.get(Calendar.MINUTE), h24).show();
+        }, c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)).show();
+    }
+
+    void remText(final Reminders.Item base, final long when) {
+        final EditText in = new EditText(this);
+        in.setHint("Reminder text");
+        if (base != null) in.setText(base.text);
+        showDlg(new AlertDialog.Builder(this).setTitle(dtf().format(new Date(when))).setView(in)
+                .setPositiveButton("Save", (d, w) -> {
+                    String txt = in.getText().toString().trim();
+                    if (txt.isEmpty()) txt = "Reminder";
+                    if (when < System.currentTimeMillis() + 5000) { toast("That time has already passed"); return; }
+                    List<Reminders.Item> l = Reminders.load(this);
+                    Reminders.Item it = null;
+                    if (base != null) for (Reminders.Item x : l) if (x.id == base.id) it = x;
+                    if (it == null) { it = new Reminders.Item(); it.id = System.currentTimeMillis(); l.add(it); }
+                    it.time = when;
+                    it.text = txt;
+                    it.fired = false;
+                    Reminders.save(this, l);
+                    Reminders.schedule(this, it);
+                    toast("Reminder set");
+                    if (mode == M_REM) showReminders(0);
+                }).setNegativeButton("Cancel", null));
+    }
+
+    // ======================================================================
+    // journal page: typed notes and voice memos, kept in the launcher's private storage
+    // ======================================================================
+
+    class JEntry { File f; long t; boolean voice; int secs; }
+
+    File jdir() {
+        File f = new File(getFilesDir(), "journal");
+        f.mkdirs();
+        return f;
+    }
+
+    String stamp() { return new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()); }
+
+    List<JEntry> journalEntries() {
+        List<JEntry> out = new ArrayList<>();
+        File[] fs = jdir().listFiles();
+        if (fs == null) return out;
+        SimpleDateFormat pf = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US);
+        for (File f : fs) {
+            String n = f.getName();
+            boolean v = n.endsWith(".m4a"), tx = n.endsWith(".txt");
+            if ((!v && !tx) || n.startsWith("rec_tmp")) continue;
+            JEntry e = new JEntry();
+            e.f = f;
+            e.voice = v;
+            e.t = f.lastModified();
+            try {
+                String[] parts = n.substring(0, n.lastIndexOf('.')).split("_");
+                e.t = pf.parse(parts[0] + "_" + parts[1]).getTime();
+                if (v && parts.length > 2) e.secs = Integer.parseInt(parts[2]);
+            } catch (Exception ex) { }
+            out.add(e);
+        }
+        Collections.sort(out, (a, b) -> Long.compare(b.t, a.t));
+        return out;
+    }
+
+    String readText(File f) {
+        try {
+            byte[] b = new byte[(int) f.length()];
+            FileInputStream in = new FileInputStream(f);
+            int off = 0;
+            while (off < b.length) {
+                int r = in.read(b, off, b.length - off);
+                if (r < 0) break;
+                off += r;
+            }
+            in.close();
+            return new String(b, 0, off, StandardCharsets.UTF_8);
+        } catch (Exception e) { return ""; }
+    }
+
+    void showJournal(int sel) {
+        mode = M_JOUR;
+        final List<JEntry> items = journalEntries();
+        List<String> rows = new ArrayList<>();
+        SimpleDateFormat df = dtf();
+        for (JEntry e : items) {
+            String head = df.format(new Date(e.t));
+            if (e.voice) {
+                boolean on = e.f.getAbsolutePath().equals(playingPath);
+                rows.add((on ? "> Playing  " : "") + head + "\nVoice memo " + fmtSecs(e.secs));
+            } else {
+                String first = readText(e.f).trim().replace('\n', ' ');
+                if (first.length() > 90) first = first.substring(0, 90) + "...";
+                rows.add(head + "\n" + first);
+            }
+        }
+        if (rows.isEmpty()) rows.add("No entries yet. Press New.");
+        setupList(textAdapter(rows), pos -> { if (pos < items.size()) journalOpen(items.get(pos), pos); });
+        selPos = Math.min(sel, rows.size() - 1);
+        list.setSelection(selPos);
+        listPage("Journal", list, bar3("New", v -> journalNew(), "Open", v -> openSel(), "Back", v -> showHome()));
+    }
+
+    void journalNew() {
+        new AlertDialog.Builder(this).setTitle("New entry").setItems(new String[]{"Voice memo", "Typed note", "Cancel"}, (d, which) -> {
+            if (which == 0) startRecordFlow();
+            else if (which == 1) noteDialog(null);
+        }).show();
+    }
+
+    void journalOpen(final JEntry e, final int pos) {
+        if (e.voice) {
+            final boolean playing = e.f.getAbsolutePath().equals(playingPath);
+            new AlertDialog.Builder(this).setTitle("Voice memo " + fmtSecs(e.secs))
+                    .setItems(new String[]{playing ? "Stop" : "Play", "Delete", "Cancel"}, (d, which) -> {
+                        if (which == 0) {
+                            if (playing) stopPlay(); else startPlay(e.f);
+                            if (mode == M_JOUR) showJournal(pos);
+                        } else if (which == 1) journalDelete(e, pos);
+                    }).show();
+        } else {
+            new AlertDialog.Builder(this).setTitle(dtf().format(new Date(e.t))).setMessage(readText(e.f))
+                    .setPositiveButton("Edit", (d, w) -> noteDialog(e.f))
+                    .setNeutralButton("Delete", (d, w) -> journalDelete(e, pos))
+                    .setNegativeButton("Close", null).show();
+        }
+    }
+
+    void journalDelete(final JEntry e, final int pos) {
+        confirm("Delete this entry?", () -> {
+            if (e.f.getAbsolutePath().equals(playingPath)) stopPlay();
+            e.f.delete();
+            if (mode == M_JOUR) showJournal(Math.max(0, pos - 1));
+        });
+    }
+
+    void noteDialog(final File existing) {
+        final EditText in = new EditText(this);
+        in.setMinLines(4);
+        in.setGravity(Gravity.TOP | Gravity.START);
+        in.setHint("Write your note");
+        if (existing != null) in.setText(readText(existing));
+        showDlg(new AlertDialog.Builder(this).setTitle(existing == null ? "New note" : "Edit note").setView(in)
+                .setPositiveButton("Save", (d, w) -> {
+                    String txt = in.getText().toString().trim();
+                    if (txt.isEmpty()) { toast("Nothing to save"); return; }
+                    File f = existing != null ? existing : new File(jdir(), stamp() + ".txt");
+                    try {
+                        FileOutputStream fo = new FileOutputStream(f);
+                        fo.write(txt.getBytes(StandardCharsets.UTF_8));
+                        fo.close();
+                        toast("Saved");
+                    } catch (Exception ex) { toast("Couldn't save"); }
+                    if (mode == M_JOUR) showJournal(0);
+                }).setNegativeButton("Cancel", null));
+    }
+
+    // ---- playback
+    void startPlay(File f) {
+        stopPlay();
+        try {
+            mp = new MediaPlayer();
+            mp.setDataSource(f.getAbsolutePath());
+            mp.prepare();
+            mp.setOnCompletionListener(m -> {
+                stopPlay();
+                if (mode == M_JOUR) showJournal(selPos);
+            });
+            mp.start();
+            playingPath = f.getAbsolutePath();
+        } catch (Exception ex) {
+            stopPlay();
+            toast("Couldn't play that memo");
+        }
+    }
+
+    void stopPlay() {
+        if (mp != null) {
+            try { mp.stop(); } catch (Exception ex) { }
+            try { mp.release(); } catch (Exception ex) { }
+            mp = null;
+        }
+        playingPath = "";
+    }
+
+    // ---- recording
+    void startRecordFlow() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 2);
+            return;
+        }
+        doRecord();
+    }
+
+    void doRecord() {
+        stopPlay();
+        File tmp = new File(jdir(), "rec_tmp.m4a");
+        try {
+            rec = Build.VERSION.SDK_INT >= 31 ? new MediaRecorder(this) : new MediaRecorder();
+            rec.setAudioSource(MediaRecorder.AudioSource.MIC);
+            rec.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+            rec.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
+            rec.setAudioEncodingBitRate(64000);
+            rec.setAudioSamplingRate(22050);
+            rec.setOutputFile(tmp.getAbsolutePath());
+            rec.prepare();
+            rec.start();
+        } catch (Exception ex) {
+            try { if (rec != null) rec.release(); } catch (Exception e2) { }
+            rec = null;
+            toast("Couldn't start the microphone");
+            return;
+        }
+        recStart = SystemClock.elapsedRealtime();
+        recDlg = new AlertDialog.Builder(this).setTitle("Recording...").setMessage("0:00").setCancelable(false)
+                .setPositiveButton("Save", (d, w) -> finishRecord(true))
+                .setNegativeButton("Discard", (d, w) -> finishRecord(false)).create();
+        recDlg.show();
+        h.postDelayed(recTick, 500);
+    }
+
+    void finishRecord(boolean save) {
+        if (rec == null) return;
+        h.removeCallbacks(recTick);
+        int secs = (int) ((SystemClock.elapsedRealtime() - recStart) / 1000);
+        boolean ok = true;
+        try { rec.stop(); } catch (Exception ex) { ok = false; }
+        try { rec.release(); } catch (Exception ex) { }
+        rec = null;
+        try { if (recDlg != null && recDlg.isShowing()) recDlg.dismiss(); } catch (Exception ex) { }
+        recDlg = null;
+        File tmp = new File(jdir(), "rec_tmp.m4a");
+        if (save && ok && tmp.exists()) {
+            File dst = new File(jdir(), stamp() + "_" + secs + ".m4a");
+            if (tmp.renameTo(dst)) toast("Voice memo saved");
+            else toast("Couldn't save the memo");
+        } else {
+            tmp.delete();
+            if (save) toast("Recording was too short");
+        }
+        if (mode == M_JOUR) showJournal(0);
+    }
+
+    // ======================================================================
+    // map page: OpenStreetMap tiles (cached on the phone), GPS dot, place search
+    // ======================================================================
+
+    void showMap() {
+        mode = M_MAP;
+        LinearLayout p = page();
+        TextView t = tv("Map", 20, true, BART);
+        t.setGravity(Gravity.CENTER);
+        t.setBackground(barBg());
+        t.setPadding(dp(8), dp(8), dp(8), dp(8));
+        p.addView(t, new LinearLayout.LayoutParams(-1, -2));
+        mapView = new MapView(this);
+        p.addView(mapView, new LinearLayout.LayoutParams(-1, 0, 1));
+        p.addView(bar3("Zoom -", v -> { if (mapView != null) mapView.zoom(-1); }, "Menu", v -> mapMenu(),
+                "Zoom +", v -> { if (mapView != null) mapView.zoom(1); }));
+        setContentView(p);
+        startLocation();
+    }
+
+    // D-pad on the map: arrows pan, centre opens the map menu
+    void mapKey(int k) {
+        if (mapView == null) return;
+        int st = 80;
+        if (k == KeyEvent.KEYCODE_DPAD_UP) mapView.pan(0, -st);
+        else if (k == KeyEvent.KEYCODE_DPAD_DOWN) mapView.pan(0, st);
+        else if (k == KeyEvent.KEYCODE_DPAD_LEFT) mapView.pan(-st, 0);
+        else if (k == KeyEvent.KEYCODE_DPAD_RIGHT) mapView.pan(st, 0);
+        else mapMenu();
+    }
+
+    void mapMenu() {
+        new AlertDialog.Builder(this).setTitle("Map")
+                .setItems(new String[]{"Search place", "My location", "Zoom in", "Zoom out", "Clear map cache", "Back to home"}, (d, which) -> {
+                    if (mapView == null) return;
+                    if (which == 0) mapSearch();
+                    else if (which == 1) mapMe();
+                    else if (which == 2) mapView.zoom(1);
+                    else if (which == 3) mapView.zoom(-1);
+                    else if (which == 4) {
+                        deleteRec(new File(getFilesDir(), "tiles"));
+                        tileCache.evictAll();
+                        mapView.invalidate();
+                        toast("Map cache cleared");
+                    } else showHome();
+                }).show();
+    }
+
+    void mapMe() {
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, 3);
+            return;
+        }
+        startLocation();
+        if (mapView.me != null) mapView.centreOnMe();
+        else {
+            mapView.centreNext = true;
+            toast("Waiting for a GPS fix. This can take a few minutes, outdoors.");
+        }
+    }
+
+    void startLocation() {
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return;
+        if (locLis != null) return;
+        try {
+            if (locMgr == null) locMgr = (LocationManager) getSystemService(LOCATION_SERVICE);
+            locLis = new LocationListener() {
+                @Override public void onLocationChanged(Location l) { if (mapView != null) mapView.setMe(l); }
+                @Override public void onStatusChanged(String pr, int st, Bundle ex) { }
+                @Override public void onProviderEnabled(String pr) { }
+                @Override public void onProviderDisabled(String pr) { }
+            };
+            String[] provs = {LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER};
+            for (String pr : provs) {
+                if (!locMgr.isProviderEnabled(pr)) continue;
+                locMgr.requestLocationUpdates(pr, 3000, 5, locLis);
+                Location last = locMgr.getLastKnownLocation(pr);
+                if (last != null && mapView != null && mapView.me == null) mapView.setMe(last);
+            }
+        } catch (Throwable t) { }
+    }
+
+    void stopLocation() {
+        try {
+            if (locMgr != null && locLis != null) locMgr.removeUpdates(locLis);
+        } catch (Throwable t) { }
+        locLis = null;
+    }
+
+    void mapSearch() {
+        final EditText in = new EditText(this);
+        in.setSingleLine(true);
+        in.setHint("Place, address or suburb");
+        showDlg(new AlertDialog.Builder(this).setTitle("Search map").setView(in)
+                .setPositiveButton("Search", (d, w) -> mapGeocode(in.getText().toString().trim()))
+                .setNegativeButton("Cancel", null));
+    }
+
+    void mapGeocode(final String q) {
+        if (q.length() < 2) { toast("Type at least 2 letters"); return; }
+        toast("Searching...");
+        new Thread(() -> {
+            try {
+                final JSONArray res = new JSONArray(http("https://nominatim.openstreetmap.org/search?format=json&limit=6&q="
+                        + URLEncoder.encode(q, "UTF-8")));
+                if (res.length() == 0) { runOnUiThread(() -> toast("No match found")); return; }
+                final String[] names = new String[res.length()];
+                for (int i = 0; i < names.length; i++) names[i] = res.getJSONObject(i).optString("display_name");
+                runOnUiThread(() -> new AlertDialog.Builder(this).setTitle("Choose place").setItems(names, (d, pick) -> {
+                    try {
+                        JSONObject r = res.getJSONObject(pick);
+                        if (mapView != null) mapView.goTo(Double.parseDouble(r.getString("lat")), Double.parseDouble(r.getString("lon")));
+                    } catch (Exception e) { }
+                }).show());
+            } catch (Exception e) { runOnUiThread(() -> toast("Search failed - check internet")); }
+        }).start();
+    }
+
+    class MapView extends View {
+        final int TS = 320; // size each map tile is drawn at, in pixels
+        double lat, lon, pinLat = Double.NaN, pinLon = Double.NaN;
+        int z;
+        Location me;
+        boolean centreNext;
+        float lastX, lastY;
+        volatile Set<String> want = new HashSet<>();
+        final Paint bp = new Paint(), p = new Paint(Paint.ANTI_ALIAS_FLAG), tp = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final Rect dst = new Rect();
+        final Runnable saveRun = new Runnable() {
+            @Override public void run() {
+                sp.edit().putString("map_lat", String.valueOf(lat)).putString("map_lon", String.valueOf(lon)).putInt("map_z", z).apply();
+            }
+        };
+
+        MapView(Context c) {
+            super(c);
+            lat = dbl("map_lat", dbl("wx_lat", -37.8136));
+            lon = dbl("map_lon", dbl("wx_lon", 144.9631));
+            z = Math.max(3, Math.min(18, sp.getInt("map_z", 13)));
+            bp.setFilterBitmap(true);
+            tp.setTextSize(dp(11));
+        }
+
+        double world() { return (double) TS * (1 << z); }
+        double px(double lo) { return (lo + 180.0) / 360.0 * world(); }
+        double py(double la) {
+            double r = Math.toRadians(Math.max(-85.05, Math.min(85.05, la)));
+            return (1.0 - Math.log(Math.tan(r) + 1.0 / Math.cos(r)) / Math.PI) / 2.0 * world();
+        }
+        double lonOf(double x) { return x / world() * 360.0 - 180.0; }
+        double latOf(double y) { return Math.toDegrees(Math.atan(Math.sinh(Math.PI - 2.0 * Math.PI * y / world()))); }
+
+        void later() { h.removeCallbacks(saveRun); h.postDelayed(saveRun, 1500); }
+
+        void pan(double dx, double dy) {
+            double cx = px(lon) + dx, cy = Math.max(0, Math.min(world(), py(lat) + dy));
+            lon = ((lonOf(cx) + 180.0) % 360.0 + 360.0) % 360.0 - 180.0;
+            lat = latOf(cy);
+            invalidate();
+            later();
+        }
+
+        void zoom(int d) {
+            z = Math.max(3, Math.min(18, z + d));
+            invalidate();
+            later();
+        }
+
+        void goTo(double la, double lo) {
+            lat = la;
+            lon = lo;
+            pinLat = la;
+            pinLon = lo;
+            if (z < 15) z = 15;
+            invalidate();
+            later();
+        }
+
+        void setMe(Location l) {
+            me = l;
+            if (centreNext) { centreNext = false; centreOnMe(); } else invalidate();
+        }
+
+        void centreOnMe() {
+            if (me == null) return;
+            lat = me.getLatitude();
+            lon = me.getLongitude();
+            if (z < 16) z = 16;
+            invalidate();
+            later();
+        }
+
+        @Override public boolean onTouchEvent(MotionEvent ev) {
+            int a = ev.getActionMasked();
+            if (a == MotionEvent.ACTION_DOWN) { lastX = ev.getX(); lastY = ev.getY(); return true; }
+            if (a == MotionEvent.ACTION_MOVE) {
+                pan(lastX - ev.getX(), lastY - ev.getY());
+                lastX = ev.getX();
+                lastY = ev.getY();
+                return true;
+            }
+            return true;
+        }
+
+        void requestTile(final String key) {
+            synchronized (pending) { if (!pending.add(key)) return; }
+            tilePool.execute(() -> {
+                try {
+                    if (!want.contains(key)) return;
+                    File f = new File(getFilesDir(), "tiles/" + key + ".png");
+                    Bitmap b = f.exists() ? BitmapFactory.decodeFile(f.getAbsolutePath()) : null;
+                    if (b == null) {
+                        f.getParentFile().mkdirs();
+                        File part = new File(f.getPath() + "." + Thread.currentThread().getId() + ".part");
+                        HttpURLConnection c = (HttpURLConnection) new URL("https://tile.openstreetmap.org/" + key + ".png").openConnection();
+                        c.setConnectTimeout(8000);
+                        c.setReadTimeout(10000);
+                        c.setRequestProperty("User-Agent", "RetroLauncher/1.0 (personal Android launcher)");
+                        if (c.getResponseCode() != 200) throw new Exception("HTTP " + c.getResponseCode());
+                        InputStream in = c.getInputStream();
+                        FileOutputStream fo = new FileOutputStream(part);
+                        byte[] buf = new byte[8192];
+                        int r;
+                        while ((r = in.read(buf)) > 0) fo.write(buf, 0, r);
+                        fo.close();
+                        in.close();
+                        part.renameTo(f);
+                        b = BitmapFactory.decodeFile(f.getAbsolutePath());
+                    }
+                    if (b != null) { tileCache.put(key, b); postInvalidate(); }
+                } catch (Exception e) {
+                } finally {
+                    synchronized (pending) { pending.remove(key); }
+                }
+            });
+        }
+
+        @Override protected void onDraw(Canvas cv) {
+            int w = getWidth(), hg = getHeight();
+            cv.drawColor(0xFFDDE3E8);
+            double left = px(lon) - w / 2.0, top = py(lat) - hg / 2.0;
+            int n = 1 << z;
+            int tx0 = (int) Math.floor(left / TS), tx1 = (int) Math.floor((left + w) / TS);
+            int ty0 = (int) Math.floor(top / TS), ty1 = (int) Math.floor((top + hg) / TS);
+            HashSet<String> nw = new HashSet<>();
+            for (int ty = ty0; ty <= ty1; ty++) {
+                if (ty < 0 || ty >= n) continue;
+                for (int tx = tx0; tx <= tx1; tx++) nw.add(z + "/" + (((tx % n) + n) % n) + "/" + ty);
+            }
+            want = nw;
+            for (int ty = ty0; ty <= ty1; ty++) {
+                if (ty < 0 || ty >= n) continue;
+                for (int tx = tx0; tx <= tx1; tx++) {
+                    String key = z + "/" + (((tx % n) + n) % n) + "/" + ty;
+                    int dx = (int) Math.round(tx * (double) TS - left), dy = (int) Math.round(ty * (double) TS - top);
+                    Bitmap b = tileCache.get(key);
+                    if (b != null) {
+                        dst.set(dx, dy, dx + TS, dy + TS);
+                        cv.drawBitmap(b, null, dst, bp);
+                    } else requestTile(key);
+                }
+            }
+            // searched place: red pin
+            if (!Double.isNaN(pinLat)) {
+                float x = (float) (px(pinLon) - left), y = (float) (py(pinLat) - top);
+                p.setStyle(Paint.Style.FILL);
+                p.setColor(0xFFE53935);
+                cv.drawCircle(x, y, dp(7), p);
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(dp(2));
+                p.setColor(0xFFFFFFFF);
+                cv.drawCircle(x, y, dp(7), p);
+            }
+            // my location: blue dot with accuracy ring
+            if (me != null) {
+                float x = (float) (px(me.getLongitude()) - left), y = (float) (py(me.getLatitude()) - top);
+                double mpp = 40075016.686 * Math.cos(Math.toRadians(me.getLatitude())) / world();
+                float ar = (float) (me.getAccuracy() / mpp);
+                if (ar > dp(8)) {
+                    p.setStyle(Paint.Style.FILL);
+                    p.setColor(0x223D8BFF);
+                    cv.drawCircle(x, y, ar, p);
+                }
+                p.setStyle(Paint.Style.FILL);
+                p.setColor(0xFF1E6BFF);
+                cv.drawCircle(x, y, dp(6), p);
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(dp(2));
+                p.setColor(0xFFFFFFFF);
+                cv.drawCircle(x, y, dp(6), p);
+            }
+            // centre cross
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(dp(1));
+            p.setColor(0xFF222222);
+            cv.drawLine(w / 2f - dp(8), hg / 2f, w / 2f + dp(8), hg / 2f, p);
+            cv.drawLine(w / 2f, hg / 2f - dp(8), w / 2f, hg / 2f + dp(8), p);
+            // labels (the credit is required by OpenStreetMap)
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(0xB3FFFFFF);
+            String att = "\u00A9 OpenStreetMap contributors";
+            cv.drawRect(0, hg - dp(18), tp.measureText(att) + dp(8), hg, p);
+            String zl = "Zoom " + z;
+            cv.drawRect(0, 0, tp.measureText(zl) + dp(8), dp(18), p);
+            tp.setColor(0xFF222222);
+            cv.drawText(att, dp(4), hg - dp(5), tp);
+            cv.drawText(zl, dp(4), dp(13), tp);
+        }
     }
 }
