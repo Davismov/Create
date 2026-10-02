@@ -3,6 +3,7 @@ package com.retro.launcher;
 import android.Manifest;
 import android.app.Activity;
 import android.app.ActivityOptions;
+import android.app.AlertDialog;
 import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.PendingIntent;
@@ -54,6 +55,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.ArrayAdapter;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -62,6 +64,7 @@ import android.widget.TextClock;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 import org.xmlpull.v1.XmlPullParser;
 
@@ -72,6 +75,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -93,7 +97,7 @@ public class MainActivity extends Activity {
     static final String[] PAL_N = {"Navy", "Sky", "Black", "Grey", "White", "Red", "Orange", "Yellow", "Green", "Teal", "Purple", "Pink"};
     static final int[] PAL_V = {0xFF0B3C6E, 0xFF35AEEA, 0xFF101820, 0xFF5A6470, 0xFFFFFFFF, 0xFFC62828,
             0xFFEF6C00, 0xFFF9A825, 0xFF2E7D32, 0xFF00838F, 0xFF6A1B9A, 0xFFD81B60};
-    static final String[] FONT_N = {"Pixel", "Condensed", "Sans", "Serif", "Mono"};
+    static final String[] FONT_N = {"Pixel", "Condensed", "Sans", "Serif", "Mono", "Custom"};
     static final int[] HG = {Gravity.LEFT, Gravity.CENTER_HORIZONTAL, Gravity.RIGHT};
     static final int[] VG = {Gravity.TOP, Gravity.CENTER_VERTICAL, Gravity.BOTTOM};
 
@@ -125,17 +129,39 @@ public class MainActivity extends Activity {
     static final Opt O_KS = Opt.num("k_s", "Calendar scale", 60, 130, 10, 100, "%");
     static final Opt O_KO = Opt.num("k_o", "Calendar opacity", 10, 100, 10, 60, "%");
     static final Opt[] CLOCK = {O_CSIZE, O_CV, O_CH, O_CF, O_CC};
-    static final Opt[] COLOURS = {O_BAR, O_BARO, O_SEL, O_TXT, O_PAN, O_PANO, O_UIF};
+    static final Opt O_BARS = Opt.choice("t_bars", "Bar style", 0, new String[]{"Flat", "Glossy", "Mirror"});
+    static final Opt[] COLOURS = {O_BAR, O_BARO, O_BARS, O_SEL, O_TXT, O_PAN, O_PANO, O_UIF};
+    static final String[] ONOFF = {"On", "Off"};
+    static final Opt O_STOP = Opt.choice("s_top", "Top bar", 0, ONOFF);
+    static final Opt O_SWX = Opt.choice("s_wx", "Weather", 0, ONOFF);
+    static final Opt O_SSIG = Opt.choice("s_sig", "Signal bar", 0, ONOFF);
+    static final Opt O_SBAT = Opt.choice("s_bat", "Battery bar", 0, ONOFF);
+    static final Opt O_SPCT = Opt.choice("s_pct", "Battery %", 0, ONOFF);
+    static final Opt O_SMAIL = Opt.choice("s_mail", "Letter icon", 0, ONOFF);
+    static final Opt O_SALM = Opt.choice("s_alm", "Alarm icon", 0, ONOFF);
+    static final Opt O_SCHG = Opt.choice("s_chg", "Charging icon", 0, ONOFF);
+    static final Opt O_SCLK = Opt.choice("s_clk", "Clock", 0, ONOFF);
+    static final Opt O_SDATE = Opt.choice("s_date", "Date", 0, ONOFF);
+    static final Opt O_SCNT = Opt.choice("s_cnt", "Letter count", 0, ONOFF);
+    static final Opt O_SESS = Opt.choice("s_ess", "Essentials page", 0, ONOFF);
+    static final Opt O_SCAL = Opt.choice("s_cal", "Calendar page", 0, ONOFF);
+    static final Opt O_SLAB = Opt.choice("s_lab", "Essentials labels", 1, ONOFF);
+    static final Opt O_WXSRC = Opt.choice("w_src", "Weather source", 1, new String[]{"Open-Meteo", "BOM (Australia)"});
+    static final Opt[] SHOW = {O_STOP, O_SWX, O_SSIG, O_SBAT, O_SPCT, O_SMAIL, O_SALM, O_SCHG, O_SCLK, O_SDATE, O_SCNT, O_SLAB};
     static final Opt[] CALENDAR = {O_KS, O_KO};
     // Pages: swipe or D-pad left/right between 0..3
-    static final int M_MENU = 0, M_HOME = 1, M_LETTERS = 2, M_CAL = 3, M_OPT = 4, M_PACK = 5, M_SET = 6;
+    static final int M_MENU = 0, M_ESS = 1, M_HOME = 2, M_LETTERS = 3, M_CAL = 4, M_OPT = 5, M_PACK = 6, M_SET = 7, M_PICK = 8, M_PAGES = 9;
 
     // 9x9 pixel icons
     static final String[] MAIL = {"         ", "#########", "##     ##", "# #   # #", "#  # #  #", "#   #   #", "#       #", "#########", "         "};
     static final String[] BELL = {"    #    ", "   ###   ", "  #####  ", "  #####  ", " ####### ", " ####### ", "#########", "         ", "    #    "};
     static final String[] BOLT = {"      ## ", "     ##  ", "    ##   ", "   ##### ", "     ##  ", "    ##   ", "   ##    ", "  ##     ", "         "};
 
-    Typeface F, FB, pixel;
+    Typeface F, FB, pixel, custom;
+    int essSel = 0, pickSlot = 0;
+    TextView essTitle;
+    FrameLayout[] essCells = new FrameLayout[9];
+    String[] essLabels = new String[9];
     Opt[] curOpts;
     String curTitle = "";
     SharedPreferences sp;
@@ -183,11 +209,115 @@ public class MainActivity extends Activity {
     }
 
     Typeface font(int i, boolean bold) {
-        Typeface b = i == 0 ? pixel : Typeface.create(i == 1 ? "sans-serif-condensed" : i == 2 ? "sans-serif" : i == 3 ? "serif" : "monospace", Typeface.NORMAL);
+        Typeface b = i == 0 ? pixel : i == 5 ? (custom != null ? custom : pixel) : Typeface.create(i == 1 ? "sans-serif-condensed" : i == 2 ? "sans-serif" : i == 3 ? "serif" : "monospace", Typeface.NORMAL);
         return bold ? Typeface.create(b, Typeface.BOLD) : b;
     }
 
     void applyFonts() { F = font(val(O_UIF), false); FB = font(val(O_UIF), true); }
+
+    boolean on(Opt o) { return val(o) == 0; }
+
+    static int mix(int c, int to, float f) {
+        int r = (int) (Color.red(c) + (Color.red(to) - Color.red(c)) * f);
+        int g = (int) (Color.green(c) + (Color.green(to) - Color.green(c)) * f);
+        int b = (int) (Color.blue(c) + (Color.blue(to) - Color.blue(c)) * f);
+        return 0xFF000000 | (r << 16) | (g << 8) | b;
+    }
+
+    Drawable barBg() { return new BarBg(val(O_BARS)); }
+
+    // ---- page order (saved in settings; Clock/home can't be switched off)
+    static final String[] PAGE_N = {"Menu", "Essentials", "Clock (home)", "Letters", "Calendar"};
+
+    int[] pageOrder() {
+        int[] d = {M_MENU, M_ESS, M_HOME, M_LETTERS, M_CAL};
+        String s = sp.getString("pg_order", "");
+        if (s.isEmpty()) return d;
+        try {
+            String[] a = s.split(",");
+            if (a.length != d.length) return d;
+            int[] o = new int[d.length];
+            boolean[] seen = new boolean[d.length];
+            for (int i = 0; i < a.length; i++) {
+                int v = Integer.parseInt(a[i].trim());
+                if (v < 0 || v >= d.length || seen[v]) return d;
+                seen[v] = true;
+                o[i] = v;
+            }
+            return o;
+        } catch (Exception e) { return d; }
+    }
+
+    void savePageOrder(int[] o) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < o.length; i++) {
+            if (i > 0) sb.append(',');
+            sb.append(o[i]);
+        }
+        sp.edit().putString("pg_order", sb.toString()).apply();
+    }
+
+    boolean pageOn(int p) { return p == M_HOME || !sp.getBoolean("pg_off" + p, false); }
+
+    // Swipe / D-pad left-right: next page in the saved order, skipping pages that are off
+    void step(int dir) {
+        int[] o = pageOrder();
+        int i = -1;
+        for (int k = 0; k < o.length; k++) if (o[k] == mode) i = k;
+        if (i < 0) return;
+        while (true) {
+            i += dir;
+            if (i < 0 || i >= o.length) return;
+            if (pageOn(o[i])) { go(o[i]); return; }
+        }
+    }
+
+    // ---- Pages settings screen
+    void showPages(int sel) {
+        mode = M_PAGES;
+        final int[] o = pageOrder();
+        List<CharSequence> rows = new ArrayList<>();
+        for (int i = 0; i < o.length; i++) {
+            int p = o[i];
+            rows.add((i + 1) + ". " + PAGE_N[p] + (p == M_HOME ? "  (always on)" : pageOn(p) ? "  - On" : "  - Off"));
+        }
+        rows.add("Reset to default");
+        rows.add("Done");
+        setupList(textAdapter(rows), pos -> {
+            if (pos < o.length) togglePage(o[pos], pos);
+            else if (pos == o.length) resetPages();
+            else showOptions();
+        });
+        selPos = Math.min(sel, rows.size() - 1);
+        list.setSelection(selPos);
+        listPage("Pages", list, bar3("Up", v -> movePage(-1), "On/Off", v -> openSel(), "Down", v -> movePage(1)));
+    }
+
+    void togglePage(int p, int pos) {
+        if (p == M_HOME) { toast("Clock stays on so you always have a home page"); return; }
+        sp.edit().putBoolean("pg_off" + p, pageOn(p)).apply();
+        showPages(pos);
+    }
+
+    void movePage(int dir) {
+        int[] o = pageOrder();
+        int i = selPos, j = i + dir;
+        if (i < 0 || i >= o.length || j < 0 || j >= o.length) return;
+        int t = o[i];
+        o[i] = o[j];
+        o[j] = t;
+        savePageOrder(o);
+        showPages(j);
+    }
+
+    void resetPages() {
+        SharedPreferences.Editor ed = sp.edit();
+        ed.remove("pg_order");
+        for (int p = 0; p < 5; p++) ed.remove("pg_off" + p);
+        ed.apply();
+        toast("Pages reset");
+        showPages(0);
+    }
 
     TextView tv(String s, int sp, boolean bold, int color) {
         TextView t = new TextView(this);
@@ -294,6 +424,47 @@ public class MainActivity extends Activity {
         @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
     }
 
+    // Top/bottom bar background: flat, glossy, or mirror (glass sheen + glare streaks)
+    class BarBg extends Drawable {
+        final int style;
+        final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        BarBg(int style) { this.style = style; }
+
+        @Override public void draw(Canvas c) {
+            Rect b = getBounds();
+            int a = BAR >>> 24, rgb = BAR & 0xFFFFFF;
+            if (style == 0) { p.setShader(null); p.setColor(BAR); c.drawRect(b, p); return; }
+            float mid = b.top + b.height() / 2f, w = b.width();
+            p.setShader(new LinearGradient(0, b.top, 0, b.bottom, (a << 24) | (mix(rgb, 0xFFFFFF, 0.28f) & 0xFFFFFF),
+                    (a << 24) | (mix(rgb, 0, 0.30f) & 0xFFFFFF), Shader.TileMode.CLAMP));
+            c.drawRect(b, p);
+            p.setShader(new LinearGradient(0, b.top, 0, mid, ((style == 2 ? 0x80 : 0x50) << 24) | 0xFFFFFF, 0x12FFFFFF, Shader.TileMode.CLAMP));
+            c.drawRect(b.left, b.top, b.right, mid, p);
+            p.setShader(null);
+            p.setColor(0x66FFFFFF);
+            c.drawRect(b.left, b.top, b.right, b.top + 1, p);
+            p.setColor(0x55000000);
+            c.drawRect(b.left, b.bottom - 1, b.right, b.bottom, p);
+            if (style == 2) {
+                p.setColor(0x26FFFFFF);
+                Path g = new Path();
+                g.moveTo(b.left + w * 0.10f, b.top); g.lineTo(b.left + w * 0.30f, b.top);
+                g.lineTo(b.left + w * 0.18f, b.bottom); g.lineTo(b.left - w * 0.02f, b.bottom); g.close();
+                c.drawPath(g, p);
+                g.reset();
+                g.moveTo(b.left + w * 0.36f, b.top); g.lineTo(b.left + w * 0.42f, b.top);
+                g.lineTo(b.left + w * 0.30f, b.bottom); g.lineTo(b.left + w * 0.24f, b.bottom); g.close();
+                c.drawPath(g, p);
+                p.setColor(0x22000000);
+                c.drawRect(b.left, mid, b.right, mid + 1, p);
+            }
+        }
+        @Override public void setAlpha(int al) { }
+        @Override public void setColorFilter(ColorFilter f) { }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+    }
+
     class SigCb extends TelephonyCallback implements TelephonyCallback.SignalStrengthsListener {
         @Override public void onSignalStrengthsChanged(SignalStrength s) { sig = s.getLevel(); updateGauges(); }
     }
@@ -308,6 +479,10 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             pixel = Typeface.create("sans-serif-condensed", Typeface.NORMAL);
         }
+        try {
+            File cf = new File(getFilesDir(), "custom.ttf");
+            if (cf.exists()) custom = Typeface.createFromFile(cf);
+        } catch (Exception e) { custom = null; }
         loadTheme();
         applyFonts();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
@@ -319,8 +494,8 @@ public class MainActivity extends Activity {
                 if (a == null || e == null || mode > M_CAL) return false;
                 float dx = e.getX() - a.getX(), dy = e.getY() - a.getY();
                 if (Math.abs(dx) > dp(70) && Math.abs(dx) > Math.abs(dy) * 1.5f) {
-                    final int to = dx < 0 ? mode + 1 : mode - 1;
-                    h.post(() -> go(to));
+                    final int dir = dx < 0 ? 1 : -1;
+                    h.post(() -> step(dir));
                     return true;
                 }
                 return false;
@@ -341,7 +516,8 @@ public class MainActivity extends Activity {
     @Override protected void onResume() { super.onResume(); h.removeCallbacks(tick); h.post(tick); }
     @Override protected void onPause() { super.onPause(); h.removeCallbacks(tick); }
     @Override public void onBackPressed() {
-        if (mode == M_SET || mode == M_PACK) showOptions();
+        if (mode == M_PICK) showEssentials();
+        else if (mode == M_SET || mode == M_PACK || mode == M_PAGES) showOptions();
         else if (mode != M_HOME) showHome();
     }
 
@@ -365,7 +541,8 @@ public class MainActivity extends Activity {
     }
 
     void navKey(int k) {
-        boolean isList = mode == M_MENU || mode == M_LETTERS || mode == M_OPT || mode == M_PACK || mode == M_SET;
+        if (mode == M_ESS) { essKey(k); return; }
+        boolean isList = mode == M_MENU || mode == M_LETTERS || mode == M_OPT || mode == M_PACK || mode == M_SET || mode == M_PICK || mode == M_PAGES;
         switch (k) {
             case KeyEvent.KEYCODE_DPAD_UP:
                 if (isList) moveSel(-1); else if (mode == M_CAL) shiftMonth(calY, calM, -1);
@@ -374,10 +551,10 @@ public class MainActivity extends Activity {
                 if (isList) moveSel(1); else if (mode == M_CAL) shiftMonth(calY, calM, 1);
                 break;
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                if (mode <= M_CAL) go(mode - 1); else if (mode == M_SET) adjust(-1);
+                if (mode <= M_CAL) step(-1); else if (mode == M_SET) adjust(-1); else if (mode == M_PAGES) movePage(-1);
                 break;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                if (mode <= M_CAL) go(mode + 1); else if (mode == M_SET) adjust(1);
+                if (mode <= M_CAL) step(1); else if (mode == M_SET) adjust(1); else if (mode == M_PAGES) movePage(1);
                 break;
             default:
                 if (isList) openSel(); else if (mode == M_HOME) go(M_MENU);
@@ -392,8 +569,9 @@ public class MainActivity extends Activity {
     }
 
     void go(int p) {
-        if (p < 0 || p > M_CAL || p == mode) return;
+        if (p < M_MENU || p > M_CAL || p == mode) return;
         if (p == M_MENU) showMenu();
+        else if (p == M_ESS) showEssentials();
         else if (p == M_HOME) showHome();
         else if (p == M_LETTERS) showLetters();
         else { Calendar n = Calendar.getInstance(); showCalendar(n.get(Calendar.YEAR), n.get(Calendar.MONTH)); }
@@ -433,38 +611,92 @@ public class MainActivity extends Activity {
 
     // ---------- weather ----------
 
-    String wxText(int c) {
-        if (c == 0) return "Clear";
-        if (c <= 2) return "Fine";
-        if (c == 3) return "Cloudy";
+    String wxText(int c, boolean day) {
+        if (c == 0) return day ? "Sunny" : "Clear";
+        if (c == 1) return day ? "Mostly sunny" : "Mostly clear";
+        if (c == 2) return "Partly cloudy";
+        if (c == 3) return "Overcast";
         if (c == 45 || c == 48) return "Fog";
         if (c >= 51 && c <= 57) return "Drizzle";
-        if (c >= 61 && c <= 67) return "Rain";
+        if (c == 66 || c == 67) return "Freezing rain";
+        if (c >= 61 && c <= 65) return "Rain";
         if (c >= 71 && c <= 77) return "Snow";
         if (c >= 80 && c <= 82) return "Showers";
-        if (c >= 85 && c <= 86) return "Snow";
+        if (c >= 85 && c <= 86) return "Snow showers";
         if (c >= 95) return "Storm";
         return "";
     }
 
+    double dbl(String k, double d) { try { return Double.parseDouble(sp.getString(k, "")); } catch (Exception e) { return d; } }
+
+    String http(String url) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setConnectTimeout(8000);
+        c.setReadTimeout(8000);
+        c.setRequestProperty("User-Agent", "RetroLauncher/1.0");
+        if (c.getResponseCode() != 200) throw new Exception("HTTP " + c.getResponseCode());
+        BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream()));
+        StringBuilder sb = new StringBuilder();
+        String ln;
+        while ((ln = br.readLine()) != null) sb.append(ln);
+        br.close();
+        return sb.toString();
+    }
+
+    static String geohash(double lat, double lon, int len) {
+        String B = "0123456789bcdefghjkmnpqrstuvwxyz";
+        double[] la = {-90, 90}, lo = {-180, 180};
+        StringBuilder sb = new StringBuilder();
+        boolean even = true;
+        int bit = 0, ch = 0;
+        while (sb.length() < len) {
+            double[] r = even ? lo : la;
+            double v = even ? lon : lat, mid = (r[0] + r[1]) / 2;
+            if (v >= mid) { ch = (ch << 1) | 1; r[0] = mid; } else { ch = ch << 1; r[1] = mid; }
+            even = !even;
+            if (++bit == 5) { sb.append(B.charAt(ch)); bit = 0; ch = 0; }
+        }
+        return sb.toString();
+    }
+
+    // Model forecast for any place in the world
+    String omWeather(double lat, double lon) {
+        try {
+            JSONObject cur = new JSONObject(http("https://api.open-meteo.com/v1/forecast?latitude=" + lat + "&longitude=" + lon
+                    + "&current=temperature_2m,weather_code,is_day")).getJSONObject("current");
+            return Math.round(cur.getDouble("temperature_2m")) + "\u00b0C " + wxText(cur.getInt("weather_code"), cur.optInt("is_day", 1) == 1);
+        } catch (Exception e) { return null; }
+    }
+
+    // Real station readings from the Australian Bureau of Meteorology (unofficial public feed)
+    String bomWeather(double lat, double lon) {
+        try {
+            String base = "https://api.weather.bom.gov.au/v1/locations/" + geohash(lat, lon, 6);
+            JSONObject obs = new JSONObject(http(base + "/observations")).getJSONObject("data");
+            if (obs.isNull("temp")) return null;
+            String cond = "";
+            try {
+                JSONObject d0 = new JSONObject(http(base + "/forecasts/daily")).getJSONArray("data").getJSONObject(0);
+                String ic = d0.optString("icon_descriptor", "");
+                if (!ic.isEmpty() && !ic.equals("null")) {
+                    ic = ic.replace('_', ' ');
+                    cond = " " + Character.toUpperCase(ic.charAt(0)) + ic.substring(1);
+                }
+            } catch (Exception e) { }
+            return Math.round(obs.getDouble("temp")) + "\u00b0C" + cond;
+        } catch (Exception e) { return null; }
+    }
+
     void fetchWeather() {
         new Thread(() -> {
-            try {
-                URL u = new URL("https://api.open-meteo.com/v1/forecast?latitude=" + LAT + "&longitude=" + LON
-                        + "&current=temperature_2m,weather_code");
-                HttpURLConnection c = (HttpURLConnection) u.openConnection();
-                c.setConnectTimeout(8000);
-                c.setReadTimeout(8000);
-                BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream()));
-                StringBuilder sb = new StringBuilder();
-                String ln;
-                while ((ln = br.readLine()) != null) sb.append(ln);
-                br.close();
-                JSONObject cur = new JSONObject(sb.toString()).getJSONObject("current");
-                final String txt = Math.round(cur.getDouble("temperature_2m")) + "\u00b0C " + wxText(cur.getInt("weather_code"));
-                sp.edit().putString("wx", txt).apply();
-                runOnUiThread(() -> { if (wx != null) wx.setText(txt); });
-            } catch (Exception e) { }
+            double lat = dbl("wx_lat", -37.8136), lon = dbl("wx_lon", 144.9631);
+            String t = null;
+            if (val(O_WXSRC) == 1) t = bomWeather(lat, lon);
+            if (t == null) t = omWeather(lat, lon);
+            if (t == null) return;
+            final String txt = t;
+            sp.edit().putString("wx", txt).apply();
+            runOnUiThread(() -> { if (wx != null) wx.setText(txt); });
         }).start();
     }
 
@@ -478,7 +710,7 @@ public class MainActivity extends Activity {
 
     LinearLayout bar(String left, View.OnClickListener lc, String right, View.OnClickListener rc) {
         LinearLayout b = new LinearLayout(this);
-        b.setBackgroundColor(BAR);
+        b.setBackground(barBg());
         TextView a = tv(left, 20, true, BART), c = tv(right, 20, true, BART);
         a.setPadding(dp(12), dp(12), dp(12), dp(12));
         c.setPadding(dp(12), dp(12), dp(12), dp(12));
@@ -492,7 +724,7 @@ public class MainActivity extends Activity {
 
     LinearLayout bar3(String l, View.OnClickListener lc, String m, View.OnClickListener mc, String r, View.OnClickListener rc) {
         LinearLayout b = new LinearLayout(this);
-        b.setBackgroundColor(BAR);
+        b.setBackground(barBg());
         String[] lab = {l, m, r};
         View.OnClickListener[] act = {lc, mc, rc};
         for (int i = 0; i < 3; i++) {
@@ -521,7 +753,7 @@ public class MainActivity extends Activity {
         LinearLayout p = page();
         TextView t = tv(title, 20, true, BART);
         t.setGravity(Gravity.CENTER);
-        t.setBackgroundColor(BAR);
+        t.setBackground(barBg());
         t.setPadding(dp(8), dp(8), dp(8), dp(8));
         p.addView(t, new LinearLayout.LayoutParams(-1, -2));
         if (extra != null) p.addView(extra, new LinearLayout.LayoutParams(-1, -2));
@@ -576,7 +808,7 @@ public class MainActivity extends Activity {
         LinearLayout p = page();
 
         LinearLayout top = new LinearLayout(this);
-        top.setBackgroundColor(BAR);
+        top.setBackground(barBg());
         top.setPadding(dp(10), dp(6), dp(10), dp(6));
         top.setGravity(Gravity.CENTER_VERTICAL);
         wx = tv(sp.getString("wx", "Weather"), 15, true, BART);
@@ -635,6 +867,18 @@ public class MainActivity extends Activity {
         mid.addView(date);
         mid.addView(noteCount);
         mid.addView(bars);
+        top.setVisibility(on(O_STOP) ? View.VISIBLE : View.GONE);
+        wx.setVisibility(on(O_SWX) ? View.VISIBLE : View.GONE);
+        batt.setVisibility(on(O_SPCT) ? View.VISIBLE : View.GONE);
+        icoCharge.setVisibility(on(O_SCHG) ? View.VISIBLE : View.GONE);
+        icoAlarm.setVisibility(on(O_SALM) ? View.VISIBLE : View.GONE);
+        icoMail.setVisibility(on(O_SMAIL) ? View.VISIBLE : View.GONE);
+        sigG.setVisibility(on(O_SSIG) ? View.VISIBLE : View.GONE);
+        batG.setVisibility(on(O_SBAT) ? View.VISIBLE : View.GONE);
+        bars.setVisibility(on(O_SSIG) || on(O_SBAT) ? View.VISIBLE : View.GONE);
+        clock.setVisibility(on(O_SCLK) ? View.VISIBLE : View.GONE);
+        date.setVisibility(on(O_SDATE) ? View.VISIBLE : View.GONE);
+        noteCount.setVisibility(on(O_SCNT) ? View.VISIBLE : View.GONE);
         mid.setOnLongClickListener(v -> { // long-press the middle to change wallpaper
             pickWallpaper();
             return true;
@@ -767,21 +1011,27 @@ public class MainActivity extends Activity {
 
     // ---------- menu, options, icon packs ----------
 
+    Drawable packIcon(String pkg, String cls) {
+        if (packRes == null) return null;
+        String dr = packMap.get("ComponentInfo{" + pkg + "/" + cls + "}");
+        if (dr == null) return null;
+        try {
+            int id = packRes.getIdentifier(dr, "drawable", packPkg);
+            if (id != 0) return packRes.getDrawable(id, null);
+        } catch (Exception e) { }
+        return null;
+    }
+
     Drawable iconFor(ResolveInfo ri, PackageManager pm) {
-        if (packRes != null) {
-            String key = "ComponentInfo{" + ri.activityInfo.packageName + "/" + ri.activityInfo.name + "}";
-            String dr = packMap.get(key);
-            if (dr != null) {
-                try {
-                    int id = packRes.getIdentifier(dr, "drawable", packPkg);
-                    if (id != 0) {
-                        Drawable d = packRes.getDrawable(id, null);
-                        if (d != null) return d;
-                    }
-                } catch (Exception e) { }
-            }
-        }
-        return ri.loadIcon(pm);
+        Drawable d = packIcon(ri.activityInfo.packageName, ri.activityInfo.name);
+        return d != null ? d : ri.loadIcon(pm);
+    }
+
+    void launch(String pkg, String cls) {
+        try {
+            startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                    .setComponent(new ComponentName(pkg, cls)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception e) { toast("Can't open that app"); }
     }
 
     // Reads the appfilter.xml used by ADW/Nova-style icon packs
@@ -814,13 +1064,15 @@ public class MainActivity extends Activity {
         } catch (Exception e) { packRes = null; }
     }
 
-    void showMenu() {
-        mode = M_MENU;
-        final PackageManager pm = getPackageManager();
+    List<ResolveInfo> allApps(PackageManager pm) {
         Intent q = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
-        final List<ResolveInfo> apps = new ArrayList<>(pm.queryIntentActivities(q, 0));
+        List<ResolveInfo> apps = new ArrayList<>(pm.queryIntentActivities(q, 0));
         Collections.sort(apps, new ResolveInfo.DisplayNameComparator(pm));
-        setupList(new ArrayAdapter<ResolveInfo>(this, 0, apps) {
+        return apps;
+    }
+
+    ArrayAdapter<ResolveInfo> appAdapter(List<ResolveInfo> apps, final PackageManager pm) {
+        return new ArrayAdapter<ResolveInfo>(this, 0, apps) {
             @Override public View getView(int pos, View v, ViewGroup parent) {
                 TextView t = (v instanceof TextView) ? (TextView) v : new TextView(MainActivity.this);
                 ResolveInfo ri = getItem(pos);
@@ -836,39 +1088,300 @@ public class MainActivity extends Activity {
                 styleRow(t, pos);
                 return t;
             }
-        }, pos -> {
-            ResolveInfo ri = apps.get(pos);
-            Intent li = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                    .setComponent(new ComponentName(ri.activityInfo.packageName, ri.activityInfo.name))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(li);
-        });
+        };
+    }
+
+    void showMenu() {
+        mode = M_MENU;
+        final PackageManager pm = getPackageManager();
+        final List<ResolveInfo> apps = allApps(pm);
+        setupList(appAdapter(apps, pm), pos -> launch(apps.get(pos).activityInfo.packageName, apps.get(pos).activityInfo.name));
         listPage("Menu", list, bar3("Options", v -> showOptions(), "Select", v -> openSel(), "Back", v -> showHome()));
+    }
+
+    // ---------- essentials: 3x3 icon grid (like the Nokia main menu) ----------
+
+    // First run: fill the grid with common essentials by name; edit any slot afterwards
+    void initEss() {
+        if (sp.getBoolean("ess_init", false)) return;
+        PackageManager pm = getPackageManager();
+        List<ResolveInfo> all = allApps(pm);
+        String[] want = {"phone|dialer", "messag|sms", "contacts", "camera", "maps|navigation", "calculator|calc", "clock", "gallery|photos", "settings"};
+        Set<String> used = new HashSet<>();
+        SharedPreferences.Editor ed = sp.edit();
+        for (int i = 0; i < 9; i++) {
+            for (ResolveInfo ri : all) {
+                String key = ri.activityInfo.packageName + "/" + ri.activityInfo.name;
+                String lab = String.valueOf(ri.loadLabel(pm)).toLowerCase(Locale.ROOT);
+                if (!used.contains(key) && lab.matches(".*(" + want[i] + ").*")) {
+                    ed.putString("ess" + i, key);
+                    used.add(key);
+                    break;
+                }
+            }
+        }
+        ed.putBoolean("ess_init", true).apply();
+    }
+
+    void showEssentials() {
+        mode = M_ESS;
+        initEss();
+        final PackageManager pm = getPackageManager();
+        LinearLayout p = page();
+        essTitle = tv("", 20, true, BART);
+        essTitle.setGravity(Gravity.CENTER);
+        essTitle.setBackground(barBg());
+        essTitle.setPadding(dp(8), dp(8), dp(8), dp(8));
+        p.addView(essTitle, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout grid = new LinearLayout(this);
+        grid.setOrientation(LinearLayout.VERTICAL);
+        grid.setPadding(dp(8), dp(8), dp(8), dp(8));
+        for (int r = 0; r < 3; r++) {
+            LinearLayout row = new LinearLayout(this);
+            for (int c = 0; c < 3; c++) {
+                final int idx = r * 3 + c;
+                String s = sp.getString("ess" + idx, "");
+                Drawable d = null;
+                String label = "";
+                if (!s.isEmpty()) {
+                    String[] pc = s.split("/", 2);
+                    try {
+                        ComponentName cn = new ComponentName(pc[0], pc[1]);
+                        label = String.valueOf(pm.getActivityInfo(cn, 0).loadLabel(pm));
+                        d = packIcon(pc[0], pc[1]);
+                        if (d == null) d = pm.getActivityIcon(cn);
+                    } catch (Exception e) { d = null; label = ""; }
+                }
+                essLabels[idx] = label.isEmpty() ? "Empty" : label;
+                LinearLayout inner = new LinearLayout(this);
+                inner.setOrientation(LinearLayout.VERTICAL);
+                inner.setGravity(Gravity.CENTER);
+                if (d != null) {
+                    ImageView iv = new ImageView(this);
+                    iv.setImageDrawable(d);
+                    inner.addView(iv, new LinearLayout.LayoutParams(dp(52), dp(52)));
+                    if (on(O_SLAB)) {
+                        TextView lb = tv(label, 12, false, Color.WHITE);
+                        lb.setShadowLayer(3, 1, 1, 0xCC000000);
+                        lb.setGravity(Gravity.CENTER);
+                        lb.setSingleLine(true);
+                        lb.setEllipsize(TextUtils.TruncateAt.END);
+                        inner.addView(lb, new LinearLayout.LayoutParams(-1, -2));
+                    }
+                } else {
+                    TextView plus = tv("+", 30, true, 0x88FFFFFF);
+                    plus.setGravity(Gravity.CENTER);
+                    inner.addView(plus);
+                }
+                FrameLayout cell = new FrameLayout(this);
+                cell.addView(inner, new FrameLayout.LayoutParams(-1, -1));
+                cell.setOnClickListener(v -> {
+                    if (idx == essSel) launchEss(idx);
+                    else { essSel = idx; updateEss(); }
+                });
+                essCells[idx] = cell;
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -1, 1);
+                lp.setMargins(dp(3), dp(3), dp(3), dp(3));
+                row.addView(cell, lp);
+            }
+            grid.addView(row, new LinearLayout.LayoutParams(-1, 0, 1));
+        }
+        p.addView(grid, new LinearLayout.LayoutParams(-1, 0, 1));
+        p.addView(bar3("Edit", v -> showPicker(essSel), "Select", v -> launchEss(essSel), "Back", v -> go(M_HOME)));
+        setContentView(p);
+        updateEss();
+    }
+
+    void updateEss() {
+        for (int i = 0; i < 9; i++) if (essCells[i] != null) essCells[i].setBackground(i == essSel ? new Gloss() : null);
+        essTitle.setText(essLabels[essSel] == null ? "" : essLabels[essSel]);
+    }
+
+    // D-pad: arrows move around the grid; pushing past the edge changes page
+    void essKey(int k) {
+        int r = essSel / 3, c = essSel % 3;
+        if (k == KeyEvent.KEYCODE_DPAD_UP) { if (r > 0) essSel -= 3; }
+        else if (k == KeyEvent.KEYCODE_DPAD_DOWN) { if (r < 2) essSel += 3; }
+        else if (k == KeyEvent.KEYCODE_DPAD_LEFT) { if (c > 0) essSel--; else step(-1); }
+        else if (k == KeyEvent.KEYCODE_DPAD_RIGHT) { if (c < 2) essSel++; else step(1); }
+        else launchEss(essSel);
+        if (mode == M_ESS) updateEss();
+    }
+
+    void launchEss(int i) {
+        String s = sp.getString("ess" + i, "");
+        if (s.isEmpty()) { showPicker(i); return; }
+        String[] pc = s.split("/", 2);
+        launch(pc[0], pc[1]);
+    }
+
+    void showPicker(final int slot) {
+        mode = M_PICK;
+        pickSlot = slot;
+        final PackageManager pm = getPackageManager();
+        final List<ResolveInfo> apps = allApps(pm);
+        setupList(appAdapter(apps, pm), pos -> {
+            ResolveInfo ri = apps.get(pos);
+            sp.edit().putString("ess" + slot, ri.activityInfo.packageName + "/" + ri.activityInfo.name).apply();
+            showEssentials();
+        });
+        listPage("Slot " + (slot + 1), list, bar3("Clear", v -> {
+            sp.edit().putString("ess" + slot, "").apply();
+            showEssentials();
+        }, "Select", v -> openSel(), "Back", v -> showEssentials()));
     }
 
     void showOptions() {
         mode = M_OPT;
         List<String> rows = new ArrayList<>();
+        rows.add("Show / hide");
+        rows.add("Pages");
         rows.add("Clock settings");
         rows.add("Colour settings");
         rows.add("Calendar settings");
+        rows.add("Weather settings");
         rows.add("Icon pack");
         rows.add("Wallpaper");
         rows.add("Calendar photo");
         rows.add("Reset calendar photo");
+        rows.add("Add my own font");
+        rows.add("Remove custom font");
         setupList(textAdapter(rows), pos -> {
-            if (pos == 0) showSettings("Clock", CLOCK, 0);
-            else if (pos == 1) showSettings("Colours", COLOURS, 0);
-            else if (pos == 2) showSettings("Calendar", CALENDAR, 0);
-            else if (pos == 3) showPacks();
-            else if (pos == 4) pickWallpaper();
-            else if (pos == 5) pickPhoto();
-            else {
+            if (pos == 0) showSettings("Show / hide", SHOW, 0);
+            else if (pos == 1) showPages(0);
+            else if (pos == 2) showSettings("Clock", CLOCK, 0);
+            else if (pos == 3) showSettings("Colours", COLOURS, 0);
+            else if (pos == 4) showSettings("Calendar", CALENDAR, 0);
+            else if (pos == 5) showWeather(0);
+            else if (pos == 6) showPacks();
+            else if (pos == 7) pickWallpaper();
+            else if (pos == 8) pickPhoto();
+            else if (pos == 9) {
                 new File(getFilesDir(), "calbg.jpg").delete();
                 toast("Calendar photo reset");
-            }
+            } else if (pos == 10) pickFont();
+            else removeFont();
         });
         listPage("Options", list, bar("Select", v -> openSel(), "Back", v -> showMenu()));
+    }
+
+    // ---- weather settings
+    void showWeather(int sel) {
+        mode = M_SET;
+        curTitle = "Weather";
+        curOpts = new Opt[0];
+        List<CharSequence> rows = new ArrayList<>();
+        rows.add(rowText(O_WXSRC));
+        rows.add("Location: " + sp.getString("wx_name", "Melbourne"));
+        rows.add("Refresh now");
+        rows.add("Now: " + sp.getString("wx", "-"));
+        setupList(textAdapter(rows), pos -> {
+            if (pos == 0) {
+                sp.edit().putInt(O_WXSRC.key, 1 - val(O_WXSRC)).apply();
+                lastWx = System.currentTimeMillis();
+                fetchWeather();
+                h.postDelayed(() -> { if (mode == M_SET) showWeather(0); }, 2500);
+                toast("Updating...");
+            } else if (pos == 1) searchPlace();
+            else if (pos == 2) {
+                lastWx = System.currentTimeMillis();
+                fetchWeather();
+                toast("Updating...");
+                h.postDelayed(() -> { if (mode == M_SET) showWeather(2); }, 2500);
+            }
+        });
+        selPos = sel;
+        list.setSelection(sel);
+        listPage("Weather", list, bar("Select", v -> openSel(), "Back", v -> showOptions()));
+    }
+
+    void searchPlace() {
+        final EditText in = new EditText(this);
+        in.setSingleLine(true);
+        in.setHint("Suburb, town or postcode");
+        new AlertDialog.Builder(this).setTitle("Weather location").setView(in)
+                .setPositiveButton("Search", (d, w) -> geocode(in.getText().toString().trim()))
+                .setNegativeButton("Cancel", null).show();
+    }
+
+    void geocode(final String q) {
+        if (q.length() < 2) { toast("Type at least 2 letters"); return; }
+        new Thread(() -> {
+            try {
+                JSONObject o = new JSONObject(http("https://geocoding-api.open-meteo.com/v1/search?count=6&language=en&name="
+                        + URLEncoder.encode(q, "UTF-8")));
+                final JSONArray res = o.optJSONArray("results");
+                if (res == null || res.length() == 0) { runOnUiThread(() -> toast("No match found")); return; }
+                final String[] names = new String[res.length()];
+                for (int i = 0; i < names.length; i++) {
+                    JSONObject r = res.getJSONObject(i);
+                    names[i] = r.optString("name") + (r.has("admin1") ? ", " + r.optString("admin1") : "")
+                            + (r.has("country_code") ? ", " + r.optString("country_code") : "");
+                }
+                runOnUiThread(() -> new AlertDialog.Builder(this).setTitle("Choose place").setItems(names, (d, pick) -> {
+                    try {
+                        JSONObject r = res.getJSONObject(pick);
+                        sp.edit().putString("wx_name", r.optString("name"))
+                                .putString("wx_lat", String.valueOf(r.getDouble("latitude")))
+                                .putString("wx_lon", String.valueOf(r.getDouble("longitude"))).apply();
+                        lastWx = System.currentTimeMillis();
+                        fetchWeather();
+                        toast("Weather set to " + names[pick]);
+                        h.postDelayed(() -> { if (mode == M_SET) showWeather(1); }, 2500);
+                    } catch (Exception e) { }
+                }).show());
+            } catch (Exception e) { runOnUiThread(() -> toast("Search failed - check internet")); }
+        }).start();
+    }
+
+    // ---- your own font (.ttf / .otf)
+    void pickFont() {
+        try {
+            Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+            i.setType("*/*");
+            startActivityForResult(Intent.createChooser(i, "Choose a .ttf or .otf font"), 12);
+        } catch (Exception e) { toast("No file picker found"); }
+    }
+
+    void handleFont(int res, Intent data) {
+        if (res != RESULT_OK || data == null || data.getData() == null) return;
+        try {
+            File tmp = new File(getFilesDir(), "custom_new.ttf");
+            InputStream in = getContentResolver().openInputStream(data.getData());
+            FileOutputStream fo = new FileOutputStream(tmp);
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) fo.write(buf, 0, n);
+            fo.close();
+            in.close();
+            Typeface tf = Typeface.createFromFile(tmp);
+            if (tf == null || tf == Typeface.DEFAULT) {
+                tmp.delete();
+                toast("That doesn't look like a font file (.ttf or .otf)");
+                return;
+            }
+            File dst = new File(getFilesDir(), "custom.ttf");
+            dst.delete();
+            tmp.renameTo(dst);
+            custom = Typeface.createFromFile(dst);
+            sp.edit().putInt(O_CF.key, 5).putInt(O_UIF.key, 5).apply();
+            applyFonts();
+            toast("Font added and applied to the clock and menus");
+        } catch (Exception e) { toast("Couldn't load that font"); }
+        if (mode == M_OPT) showOptions();
+    }
+
+    void removeFont() {
+        new File(getFilesDir(), "custom.ttf").delete();
+        custom = null;
+        SharedPreferences.Editor ed = sp.edit();
+        if (val(O_CF) == 5) ed.putInt(O_CF.key, 0);
+        if (val(O_UIF) == 5) ed.putInt(O_UIF.key, 0);
+        ed.apply();
+        applyFonts();
+        toast("Custom font removed");
+        showOptions();
     }
 
     CharSequence rowText(Opt o) {
@@ -883,7 +1396,7 @@ public class MainActivity extends Activity {
 
     View clockPreview() {
         LinearLayout b = new LinearLayout(this);
-        b.setBackgroundColor(BAR);
+        b.setBackground(barBg());
         b.setGravity(Gravity.CENTER);
         TextView t = new TextView(this);
         t.setText("12:34");
@@ -981,6 +1494,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
+        if (req == 12) { handleFont(res, data); return; }
         if (req != 11 || res != RESULT_OK || data == null || data.getData() == null) return;
         try {
             BitmapFactory.Options o = new BitmapFactory.Options();
@@ -1025,7 +1539,7 @@ public class MainActivity extends Activity {
 
         LinearLayout p = page();
         TextView title = tv(new SimpleDateFormat("MMM yyyy", Locale.getDefault()).format(first.getTime()), 18, true, BART);
-        title.setBackgroundColor(BAR);
+        title.setBackground(barBg());
         title.setPadding(dp(10), dp(8), dp(10), dp(8));
         title.setOnClickListener(v -> {
             Calendar n = Calendar.getInstance();
